@@ -27,6 +27,12 @@
 *.i*86
 *.x86_64
 *.hex
+socket_handout/echoClient
+socket_handout/echoServer
+WebServer/server
 
 # Debug files
 *.dSYM/
+
+# Other
+*.c~
