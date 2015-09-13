@@ -13,29 +13,32 @@
 #define QLEN 32
 
 struct HTTP_Request {
-	char path[256];
-	char version[16];
+	char 	command[8];
+	char 	request[256];
+	char 	version[16];
+	char 	host[128];
+	int 	keep_alive;
 };
 
 struct Config {
-	char portnum[8];
-	char root[256];
-	char indexes[10][16];
-	int index_count;
-	char content[16][64];
-	int content_types;
+	char 	portnum[8];
+	char 	root[256];
+	char 	indexes[10][16];
+	int 	index_count;
+	char 	content[16][64];
+	int 	content_types;
 } config;
 
 extern int	errno;
 int 		errexit(const char *format, ...);
 int 		connectsock(const char* portnum, int qlen);
 void		parse_conf(const char* conffile);
+int			validate_request(const char* path, void *full_path, void *content_type);
 int			interpret(int fd);
 int 		process_request(const struct HTTP_Request req, void * resp);
 
 int main(int argc, char *argv[]) {
 	char *conffile = "./sample-ws.conf";
-	char *portnum = "80";
 	struct sockaddr_in c_addr; 		/* From address of client */
 	int sock;						/* Server listening socket */
 	int connection;					/* Connection socket */
@@ -45,8 +48,9 @@ int main(int argc, char *argv[]) {
 
 	// Load config
 	parse_conf(conffile);
+	printf("Found: %s\n", config.root);
 	// Create and connect listening socket
-  	sock = connectsock(portnum, QLEN);
+  	sock = connectsock(config.portnum, QLEN);
 
 	// Primary loop
 	while(1) {
@@ -93,27 +97,27 @@ void parse_conf(const char* conffile) {
 		// Ignore comments
 		if (line[0] == '#')
 			continue;
-		printf("'%s'\n", line);
 		sscanf(line, "%s %s", head, tail);
 		// Read in portnum
 		if (!strcmp(head, "Listen")) {
 			strcpy(config.portnum, tail);
 		} 
 		// Read in root
-		if (!strcmp(head, "DocumentRoot")) {
-			strcpy(config.root, tail);
+		if (!strncmp(head, "DocumentRoot", 12)) {
+			sscanf(line, "%*s \"%s", config.root);
+			// Ignore trailing quote mark
+			config.root[strlen(config.root)-1] = '\0';
 		} 
 		// Read in content
 		if (head[0] == '.') {
 			if (content_types < 16) {
-				strcat(head, ",");
+				strcat(head, " ");
 				strcat(head, tail);
 				strcpy(config.content[content_types++], head);
 			}
 		}
 		// Read in indexes
 		if (!strcmp(head, "DirectoryIndex")) {
-			strcpy(config.root, tail);
 			// Parse line on spaces
 			token = strtok(line, " ");
 			// Skip first token
@@ -129,9 +133,11 @@ void parse_conf(const char* conffile) {
 	config.index_count = index_count;
 }
 
+/* Interpret input on a socket */
 int interpret(int fd){
 	struct HTTP_Request req;
 
+	char	*bad_req = "HTTP/1.1 400 Bad Request: Invalid Method: ";
 	char	buf[BUFSIZ];
 	char	current[BUFSIZ];
 	int 	encounters = 0;
@@ -139,7 +145,7 @@ int interpret(int fd){
 
 	char	*http_req;
 
-	int	read_len = 0;
+	int		read_len = 0;
 	int 	len = 0;
 
 	/* Holds the state of a request 
@@ -147,12 +153,13 @@ int interpret(int fd){
 	 * 1 means request initiated, waiting on paramaters
 	*/
 	int 	req_state = 0; 
-	int	fragmented_request = 0;
+	int		split_request = 0;
 
 
 	// Read input from user
 	while((read_len = recv(fd, &buf[len], (BUFSIZ-len), 0)) > 0) {
-		char current[read_len];
+		char 	current[read_len];
+		int 	tokens_read = 0;
 		// Copy last received line
 		strncpy(current, &buf[len], sizeof(current));
 		current[read_len-1] = '\0';
@@ -163,36 +170,44 @@ int interpret(int fd){
 		// Split current buffer line endings
 		char *token = strtok(current, "\n\r");
 		do {
-			printf("'%s'\n", token);
 			if(req_state == 0) {	// Not currently receiving headers
 				// Valid HTTP header received
 				if (!strncmp(token, "GET", 3)) {
-					printf("Headers received: \n");
+					sscanf(token, "%s %s %s %*s", 
+						req.command, req.request, req.version);
 					req_state = 1;
-
-				} else { // Ignore
+				} else { // Invalid request
 					len = 0;
+					strcpy(resp, bad_req);
+					strcat(resp, token);
+					if (write(fd, resp, strlen(resp)) < 0)
+						errexit("echo write: %s\n", strerror(errno));
 				}
-
 			}  else if (req_state == 1) {	// Receiving request headers
-				// NULL is the end of a fragmented request			
-				if (token == NULL) {
-					fragmented_request = 1;
-				}
+				// NULL is the end of a split request			
+				if (token == NULL)
+					split_request = 1;
+				// Read in host
+				if (!strncmp(token, "Host:", 5)) 
+					sscanf(token, "%*s %s %*s", req.host);
+				// Read in keep-alive
+				if (!strcmp(token, "Connection: keep-alive"))
+					req.keep_alive = 1;
 
 			}
 			token = strtok(NULL, "\n\r");
+			tokens_read++;
 		} while(token != NULL);
 
 
-		// HTTP request was captured
-		// Empty line indicates the end of a request
-		if ((fragmented_request == 0 && req_state == 1) || fragmented_request == 1) {
-			printf("OVER\n");
+		/* HTTP request was captured
+		 * If requests were sent slowly
+		*/
+		if ((tokens_read > 1 && req_state == 1) || (split_request == 1)) {
 			req_state = 0;
 			process_request(req, resp);
 
-			if (write(fd, resp, read_len) < 0)
+			if (write(fd, resp, strlen(resp)) < 0)
 				errexit("echo write: %s\n", strerror(errno));
 			// Restart buf
 			len = 0;
@@ -211,12 +226,75 @@ int interpret(int fd){
 }
 
 /* Process HTTP_Request and build string response */
-int process_request(const struct HTTP_Request req, void * resp) {
-	printf("Sending reply\n");
+int process_request(const struct HTTP_Request req, void *resp) {
+	//printf("Sending reply\n");
+	char content_type[BUFSIZ];
+	char full_path[strlen(config.root) + strlen(req.request)];
+	int code = validate_request(req.request, full_path, content_type);
+	printf("Received %s %d %s\n", content_type, code, full_path);
 	strcpy(resp, "HTTP/1.1 200 OK\n");
 	//printf("Response: %s\n", (char*)resp);
 
 	return 0;
+}
+
+/* Test if requested file is valid 
+ * Returns: HTTP response code for request
+*/
+int validate_request(const char* path, void * full_path, void *content_type) {
+	char request [256];
+	strcpy(request, path);
+	// Build full path based on DocumentRoot
+	strcpy(full_path, config.root);
+	strcat(full_path, path);
+	// Adjust full path for DirectoryIndex call
+	int i, valid = 0;
+	if (!strncmp(path, "/", 1) && strlen(path) == 1) {
+		char test_path[strlen(full_path)+16];
+		int len = config.index_count;
+		// Test DirectoryIndexes to find one that exists
+		for (i = 0; i < len; i++) {
+			strcpy(test_path, full_path);
+			strcat(test_path, config.indexes[i]);
+			// File exists
+			if (access(test_path, F_OK) != -1) {
+				valid = 1;
+				strcpy(full_path, test_path);
+				strcpy(request, config.indexes[i]);
+				break;
+			}
+		}
+		memset(&test_path, 0, sizeof(test_path));
+		// No valid DocumentIndex found
+		if (!valid)
+			return 404;
+	}
+	// Validate request extension
+	char *ext = strrchr(request, '.');
+	if (!ext)
+		ext = ""; 
+	valid = 0;
+	int len = config.content_types;
+	for (i = 0; i < len; i++) {
+		char head[8], tail[55];
+		sscanf(config.content[i], "%s %s", head, tail);
+		// Check extension for match
+		if (!strncmp(head, ext, strlen(ext))) {
+			valid = 1;
+			// Retrieve content type
+			strcpy(content_type, tail);
+		}
+	}
+	// Extension not supported
+	if (!valid)
+		return 501;
+	// Test if files exist
+	if (access(full_path, F_OK) == -1) {
+		return 404;
+	}
+
+	//strcpy(content_type, full_path);
+	return 200;
 }
 
 
