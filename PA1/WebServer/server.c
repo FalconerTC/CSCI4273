@@ -12,27 +12,40 @@
 
 #define QLEN 32
 
+struct HTTP_Request {
+	char path[256];
+	char version[16];
+};
+
+struct Config {
+	char portnum[8];
+	char root[256];
+	char indexes[10][16];
+	int index_count;
+	char content[16][64];
+	int content_types;
+} config;
+
 extern int	errno;
 int 		errexit(const char *format, ...);
 int 		connectsock(const char* portnum, int qlen);
-int		interpret(int fd);
-int 		process_request(const HTTP_Request req, void * resp);
-
-struct HTTP_Request {
-	char path[512];
-	char version[64];
-};
+void		parse_conf(const char* conffile);
+int			interpret(int fd);
+int 		process_request(const struct HTTP_Request req, void * resp);
 
 int main(int argc, char *argv[]) {
-	
-	char *portnum = "8679";
+	char *conffile = "./sample-ws.conf";
+	char *portnum = "80";
 	struct sockaddr_in c_addr; 		/* From address of client */
-	int sock;				/* Server listening socket */
-	int connection;				/* Connection socket */
-	unsigned int alen;			/* From address length */
+	int sock;						/* Server listening socket */
+	int connection;					/* Connection socket */
+	unsigned int alen;				/* From address length */
 
 	char remoteIP[INET6_ADDRSTRLEN];
 
+	// Load config
+	parse_conf(conffile);
+	// Create and connect listening socket
   	sock = connectsock(portnum, QLEN);
 
 	// Primary loop
@@ -57,6 +70,63 @@ int main(int argc, char *argv[]) {
 		}
 		close(connection);
 	}
+}
+
+/* Get web server settings from config file */
+void parse_conf(const char* conffile) {
+	FILE *cfile;				/* Config file */
+	char* line;					/* Current line */
+	char* token;				/* Current token */
+	int read_len = 0;			/* Length read per line */
+	size_t len = 0;
+	char head[64], tail[256];
+	int content_types = 0;		/* Content types extracted */
+	int index_count = 0;		/* Directory indexes extracted */
+
+	// Open config file
+	if ((cfile = fopen(conffile, "r")) == NULL)
+		errexit("failed opening config at: '%s' %s\n", conffile, strerror(errno));
+	// Iterate through file
+	while((read_len = getline(&line, &len, cfile)) != -1) {
+		// Remove endline character
+		line[read_len-1] = '\0';
+		// Ignore comments
+		if (line[0] == '#')
+			continue;
+		printf("'%s'\n", line);
+		sscanf(line, "%s %s", head, tail);
+		// Read in portnum
+		if (!strcmp(head, "Listen")) {
+			strcpy(config.portnum, tail);
+		} 
+		// Read in root
+		if (!strcmp(head, "DocumentRoot")) {
+			strcpy(config.root, tail);
+		} 
+		// Read in content
+		if (head[0] == '.') {
+			if (content_types < 16) {
+				strcat(head, ",");
+				strcat(head, tail);
+				strcpy(config.content[content_types++], head);
+			}
+		}
+		// Read in indexes
+		if (!strcmp(head, "DirectoryIndex")) {
+			strcpy(config.root, tail);
+			// Parse line on spaces
+			token = strtok(line, " ");
+			// Skip first token
+			token = strtok(NULL, " ");
+			while(token != NULL) {
+				strcpy(config.indexes[index_count++], token);
+
+				token = strtok(NULL, " ");
+			}  
+		}
+	}
+	config.content_types = content_types;
+	config.index_count = index_count;
 }
 
 int interpret(int fd){
@@ -141,7 +211,7 @@ int interpret(int fd){
 }
 
 /* Process HTTP_Request and build string response */
-int process_request(void * resp) {
+int process_request(const struct HTTP_Request req, void * resp) {
 	printf("Sending reply\n");
 	strcpy(resp, "HTTP/1.1 200 OK\n");
 	//printf("Response: %s\n", (char*)resp);
@@ -176,7 +246,7 @@ int connectsock(const char* portnum, int qlen) {
   sockin.sin_family = AF_INET;
   // Set address to any
   sockin.sin_addr.s_addr = INADDR_ANY;
-  // Set port to netowrk short conversion of given port
+  // Set port to network short conversion of given port
   sockin.sin_port = htons((unsigned short)atoi(portnum));
 
   if (sockin.sin_port == 0)
