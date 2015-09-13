@@ -15,172 +15,134 @@
 extern int	errno;
 int 		errexit(const char *format, ...);
 int 		connectsock(const char* portnum, int qlen);
-int			interpret(int fd);
-int			parse_headers(const char* req, int len);
-int 		process_request(void * resp);
+int		interpret(int fd);
+int 		process_request(const HTTP_Request req, void * resp);
+
+struct HTTP_Request {
+	char path[512];
+	char version[64];
+};
 
 int main(int argc, char *argv[]) {
 	
 	char *portnum = "8679";
 	struct sockaddr_in c_addr; 		/* From address of client */
-	int sock;						/* Server socket */
-	int connection;
-	fd_set master_fds; 				/* active file descriptor set */
-	fd_set read_fds;				/* read file descriptor set */
-	unsigned int alen;				/* From address length */
-	int nfds;						/* Number of file descriptors */
-	int fdmax;						/* Highest file descriptor */
-	int fd;
+	int sock;				/* Server listening socket */
+	int connection;				/* Connection socket */
+	unsigned int alen;			/* From address length */
 
 	char remoteIP[INET6_ADDRSTRLEN];
 
   	sock = connectsock(portnum, QLEN);
 
-	nfds = getdtablesize();
-	FD_ZERO(&master_fds);
-	// Add socket to master_fds
-	FD_SET(sock, &master_fds);
-	// Keep track of the highest file descriptor
-	fdmax = sock;
-
 	// Primary loop
 	while(1) {
-		// Initialize read_fds
-		memcpy(&read_fds, &master_fds, sizeof(read_fds));
+		// Handle new connection
+		alen = sizeof(c_addr);
+		connection = accept(sock, (struct sockaddr *)&c_addr, &alen);
+		if (connection < 0) 
+			errexit("accept: %s\n", strerror(errno));
 
-		// Block until read_fds is ready to be read
-		if (select(fdmax+1, &read_fds, NULL, NULL, NULL) < 0)
-			errexit("select: %s\n", strerror(errno));
-
-		// Search connections for data to read
-		for (fd = 0; fd <= fdmax; fd++) {
-			if (FD_ISSET(fd, &read_fds)) {
-				if (fd == sock) {
-					// Handle new connection
-					alen = sizeof(c_addr);
-					connection = accept(sock, (struct sockaddr *)&c_addr, &alen);
-					if (connection < 0) 
-						errexit("accept: %s\n", strerror(errno));
-					// Add accepted connection
-					FD_SET(connection, &master_fds);
-					// Keep track of highest connection
-					if (connection > fdmax)
-						fdmax = connection;
-					printf("New connection from %s on socket %d\n",
-						inet_ntop(c_addr.sin_family, 
-							&(c_addr.sin_addr), 
-							remoteIP, INET6_ADDRSTRLEN), 
-						connection);
-				} else {
-					// Interpret data from client
-					if (interpret(fd) == 0) {
-						close(fd);
-						FD_CLR(fd, &master_fds);
-					}
-				}
-			}
+		printf("New connection from %s on socket %d\n",
+			inet_ntop(c_addr.sin_family, 
+				&(c_addr.sin_addr), 
+				remoteIP, INET6_ADDRSTRLEN), 
+			connection);
+		// Start receiving data from connection
+		if (!fork()) {
+			close(sock);
+			if (interpret(connection) == 0)
+				close(connection);
+			exit(0);
 		}
+		close(connection);
 	}
 }
 
 int interpret(int fd){
-	char 	http1_0[] = "GET / HTTP/1.0";
-	char 	http1_1[] = "GET / HTTP/1.1";
+	struct HTTP_Request req;
 
 	char	buf[BUFSIZ];
 	char	current[BUFSIZ];
 	int 	encounters = 0;
-	char 	req[BUFSIZ];
 	char 	resp[BUFSIZ];
 
 	char	*http_req;
 
 	int	read_len = 0;
 	int 	len = 0;
+
 	/* Holds the state of a request 
 	 * 0 means no request received
 	 * 1 means request initiated, waiting on paramaters
 	*/
 	int 	req_state = 0; 
+	int	fragmented_request = 0;
 
-
-	/*cc = read(fd, buf, sizeof buf);
-	memcpy(&req, &buf, sizeof buf);
-
-	if (cc < 0)
-		errexit("echo read: %s\n", strerror(errno)); */
 
 	// Read input from user
-	while((read_len = read(fd, &buf[len], (BUFSIZ-len))) > 0) {
+	while((read_len = recv(fd, &buf[len], (BUFSIZ-len), 0)) > 0) {
 		char current[read_len];
 		// Copy last received line
 		strncpy(current, &buf[len], sizeof(current));
 		current[read_len-1] = '\0';
 
-		printf("%s\n", buf);
+		len += read_len;
+		buf[len] = '\0';
+	
+		// Split current buffer line endings
+		char *token = strtok(current, "\n\r");
+		do {
+			printf("'%s'\n", token);
+			if(req_state == 0) {	// Not currently receiving headers
+				// Valid HTTP header received
+				if (!strncmp(token, "GET", 3)) {
+					printf("Headers received: \n");
+					req_state = 1;
 
-		if(req_state == 0) {	// Not currently receiving headers
-			// Valid HTTP header received
-			if (!strcmp(current, http1_0) || !strcmp(current, http1_1)) {
-				printf("Headers received: \n");
-				req_state = 1;
-				len += read_len;
-				continue;
+				} else { // Ignore
+					len = 0;
+				}
+
+			}  else if (req_state == 1) {	// Receiving request headers
+				// NULL is the end of a fragmented request			
+				if (token == NULL) {
+					fragmented_request = 1;
+				}
+
 			}
+			token = strtok(NULL, "\n\r");
+		} while(token != NULL);
 
-		}  else if (req_state == 1) {	// Receiving request headers
-			// Empty line indicates the end of a request
-			if (read_len == 1) {
-				printf("OVER\n");
-				req_state = 0;
-				parse_headers(buf, len);
-				// Restart buf
-				len = 0;
-			}
 
+		// HTTP request was captured
+		// Empty line indicates the end of a request
+		if ((fragmented_request == 0 && req_state == 1) || fragmented_request == 1) {
+			printf("OVER\n");
+			req_state = 0;
+			process_request(req, resp);
+
+			if (write(fd, resp, read_len) < 0)
+				errexit("echo write: %s\n", strerror(errno));
+			// Restart buf
+			len = 0;
 		}
-		//printf("%s\n", buf);
+
 	}
 
-	//printf("%s\n", buf);
-
-
-	return 1;
-
-	int cc;
-	// Remove the new line at the end
-	req[ strlen(req) - 1 ] = '\0';
-
-	http_req = strtok(buf, "\n\r");
-
-	printf("%s\n", buf);
-
-	/*while (http_req != NULL) {
-		printf("%s\n", http_req);
-		http_req = strtok(NULL, "\n\r");
-	}*/
-
-	return cc;
-
+	return 0;
 	
-	if (!strcmp(req, http1_0) || !strcmp(req, http1_1)) {
-		printf("HTTP request made\n");
-		process_request(&resp);
-	}
-	
-
+/*
 	if (cc && write(fd, resp, cc) >= 0)
 		printf("Echo: %s", resp);
 	else
 		errexit("echo write: %s\n", strerror(errno));
-	return cc;
+	return cc; */
 }
 
-int parse_headers(const char* req, int len) {
-
-}
-
+/* Process HTTP_Request and build string response */
 int process_request(void * resp) {
+	printf("Sending reply\n");
 	strcpy(resp, "HTTP/1.1 200 OK\n");
 	//printf("Response: %s\n", (char*)resp);
 
@@ -188,8 +150,7 @@ int process_request(void * resp) {
 }
 
 
-/* Print given error and exit
- */
+/* Print given error and exit */
 int errexit(const char *format, ...) {
         va_list args;
 
