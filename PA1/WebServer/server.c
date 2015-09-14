@@ -1,8 +1,11 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -35,7 +38,7 @@ int 		connectsock(const char* portnum, int qlen);
 void		parse_conf(const char* conffile);
 int			validate_request(const char* path, void *full_path, void *content_type);
 int			interpret(int fd);
-int 		process_request(const struct HTTP_Request req, void * resp);
+int 		process_request(int fd, const struct HTTP_Request req, void * resp);
 
 int main(int argc, char *argv[]) {
 	char *conffile = "./sample-ws.conf";
@@ -135,13 +138,15 @@ void parse_conf(const char* conffile) {
 
 /* Interpret input on a socket */
 int interpret(int fd){
-	struct HTTP_Request req;
+	char	*req_400_1 = "HTTP/1.1 400 Bad Request: Invalid Method: ";
+	char	*req_400_2 = "HTTP/1.1 400 Bad Request: Invalid URI: ";
+	char	*req_400_3 = "HTTP/1.1 400 Bad Request: Invalid HTTP-Version: ";
 
-	char	*bad_req = "HTTP/1.1 400 Bad Request: Invalid Method: ";
+	struct HTTP_Request req;
 	char	buf[BUFSIZ];
 	char	current[BUFSIZ];
 	int 	encounters = 0;
-	char 	resp[BUFSIZ];
+	char 	resp[2048];
 
 	char	*http_req;
 
@@ -178,9 +183,9 @@ int interpret(int fd){
 					req_state = 1;
 				} else { // Invalid request
 					len = 0;
-					strcpy(resp, bad_req);
+					strcpy(resp, req_400_1);
 					strcat(resp, token);
-					if (write(fd, resp, strlen(resp)) < 0)
+					if (send(fd, resp, strlen(resp), 0) < 0)
 						errexit("echo write: %s\n", strerror(errno));
 				}
 			}  else if (req_state == 1) {	// Receiving request headers
@@ -205,11 +210,14 @@ int interpret(int fd){
 		*/
 		if ((tokens_read > 1 && req_state == 1) || (split_request == 1)) {
 			req_state = 0;
-			process_request(req, resp);
+			process_request(fd, req, resp);
+			//resp[strlen(resp)-2] = '\0';
+			printf("Sending response\n");
 
-			if (write(fd, resp, strlen(resp)) < 0)
-				errexit("echo write: %s\n", strerror(errno));
+			/*if (write(fd, resp, strlen(resp)) < 0)
+				errexit("echo write: %s\n", strerror(errno)); */
 			// Restart buf
+			return 0;
 			len = 0;
 		}
 
@@ -226,13 +234,46 @@ int interpret(int fd){
 }
 
 /* Process HTTP_Request and build string response */
-int process_request(const struct HTTP_Request req, void *resp) {
-	//printf("Sending reply\n");
+int process_request(int fd, const struct HTTP_Request req, void *resp) {
 	char content_type[BUFSIZ];
 	char full_path[strlen(config.root) + strlen(req.request)];
+	struct stat stat_buf;
+
+	// Test path and retrive content_type
 	int code = validate_request(req.request, full_path, content_type);
+	if (code == 200) { //OK
+		int len = 0, size = 0, file;
+		//FILE *file;
+		if ((file = open(full_path, O_RDONLY)) < 0)
+			errexit("echo opening file: %s\n", strerror(errno));
+		// Find file size
+		//fseek(file, 0L, SEEK_END);
+		//size = ftell(file);
+		//rewind(file);
+		fstat(file, &stat_buf);
+		// Read file to buffer
+		//char *buf = calloc(1, size+1);
+		//if ((fread(buf, size-1, 1, file)) < 0)
+		//	errexit("echo reading file: %s\n", strerror(errno));
+
+		// Build response
+		len += sprintf(resp + len, "HTTP/1.1 200 OK\r\n");
+		len += sprintf(resp + len, "Content-Type: %s\r\n", content_type);
+		len += sprintf(resp + len, "Content-Length: %ld\r\n", stat_buf.st_size);
+		if (req.keep_alive == 1)
+			len += sprintf(resp + len, "Connection: Keep-alive\r\n\r\n");
+		//len += sprintf(resp, "%s\r\n", buf);
+		
+
+		if (write(fd, resp, strlen(resp)) < 0)
+				errexit("echo write: %s\n", strerror(errno));
+		off_t offset = 0;
+		int rc = sendfile(fd, file, &offset, stat_buf.st_size);
+	close(file);
+	}
+
 	printf("Received %s %d %s\n", content_type, code, full_path);
-	strcpy(resp, "HTTP/1.1 200 OK\n");
+	//strcpy(resp, "HTTP/1.1 200 OK\n");
 	//printf("Response: %s\n", (char*)resp);
 
 	return 0;
@@ -242,6 +283,10 @@ int process_request(const struct HTTP_Request req, void *resp) {
  * Returns: HTTP response code for request
 */
 int validate_request(const char* path, void * full_path, void *content_type) {
+	char	*req_404 = "HTTP/1.1 404 Not Found: ";
+	char	*req_501 = "HTTP/1.1 501 Not Implemented: ";
+	char	*req_500 = "HTTP/1.1 500 Internal Server Error: ";
+
 	char request [256];
 	strcpy(request, path);
 	// Build full path based on DocumentRoot
@@ -292,8 +337,7 @@ int validate_request(const char* path, void * full_path, void *content_type) {
 	if (access(full_path, F_OK) == -1) {
 		return 404;
 	}
-
-	//strcpy(content_type, full_path);
+	// OK
 	return 200;
 }
 
