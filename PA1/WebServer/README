@@ -1,0 +1,6 @@
+This will run a web server given the information described in the 'ws.conf' file
+
+To run:
+    `make && ./server`
+To clean:
+    `make clean`

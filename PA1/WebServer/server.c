@@ -138,32 +138,37 @@ void parse_conf(const char* conffile) {
 
 /* Interpret input on a socket */
 int interpret(int fd){
-	char	*req_400_1 = "HTTP/1.1 400 Bad Request: Invalid Method: ";
-	char	*req_400_2 = "HTTP/1.1 400 Bad Request: Invalid URI: ";
-	char	*req_400_3 = "HTTP/1.1 400 Bad Request: Invalid HTTP-Version: ";
-	char	*req_500 = "HTTP/1.1 500 Internal Server Error: ";
+	char	*req_400_1 =	"HTTP/1.1 400 Bad Request: Invalid Method: ";
+	char	*req_400_2 =	"HTTP/1.1 400 Bad Request: Invalid URI: ";
+	char	*req_400_3 =	"HTTP/1.1 400 Bad Request: Invalid HTTP-Version: ";
+	char	*req_500 =	"HTTP/1.1 500 Internal Server Error: ";
 
-	struct HTTP_Request req;
+	struct 	HTTP_Request req;
 	char	buf[BUFSIZ];
 	char	current[BUFSIZ];
-	int 	encounters = 0;
 	char 	resp[2048];
 
-	char	*http_req;
-
-	int		read_len = 0;
+	int	read_len = 0;
 	int 	len = 0;
-
 	/* Holds the state of a request 
 	 * 0 means no request received
 	 * 1 means request initiated, waiting on paramaters
 	*/
 	int 	req_state = 0; 
-	int		split_request = 0;
+	int	split_request = 0;
+	
+	fd_set set;
+	FD_ZERO(&set);
+	FD_SET(fd, &set);
 
 
-	// Read input from user
-	while((read_len = recv(fd, &buf[len], (BUFSIZ-len), 0)) > 0) {
+	struct timeval timeout;
+	timeout.tv_sec = 10;
+	int rv;
+
+	while ((rv = select(fd + 1, &set, NULL, NULL, &timeout)) > 0) {
+		// Read input from user
+		read_len = recv(fd, &buf[len], (BUFSIZ-len), 0);
 		char 	current[read_len];
 		int 	tokens_read = 0;
 		// Copy last received line
@@ -182,6 +187,13 @@ int interpret(int fd){
 					sscanf(token, "%s %s %s %*s", 
 						req.command, req.request, req.version);
 					req_state = 1;
+					// Unsuported version
+					if (strncmp(req.version, "HTTP/1.0", 8) &&
+						strncmp(req.version, "HTTP/1.1", 8)) {
+						int rlen = sprintf(resp, "%s", req_400_3);
+						rlen += sprintf(resp + rlen, "%s\r\n", req.version); 
+					}
+
 				} else { // Invalid request
 					len = 0;
 					strcpy(resp, req_400_1);
@@ -194,10 +206,10 @@ int interpret(int fd){
 				if (token == NULL)
 					split_request = 1;
 				// Read in host
-				if (!strncmp(token, "Host:", 5)) 
+				if (token != NULL && !strncmp(token, "Host:", 5)) 
 					sscanf(token, "%*s %s %*s", req.host);
 				// Read in keep-alive
-				if (!strcmp(token, "Connection: keep-alive"))
+				if (token != NULL && !strcmp(token, "Connection: keep-alive"))
 					req.keep_alive = 1;
 
 			}
@@ -205,9 +217,7 @@ int interpret(int fd){
 			tokens_read++;
 		} while(token != NULL);
 
-
 		/* HTTP request was captured
-		 * If requests were sent slowly
 		*/
 		if ((tokens_read > 1 && req_state == 1) || (split_request == 1)) {
 			req_state = 0;
@@ -225,7 +235,9 @@ int interpret(int fd){
 		}
 
 	}
-
+	if (rv < 0)
+		errexit("echo in select: %s\n", strerror(errno));
+	// Timeout
 	return 0;
 }
 
@@ -235,10 +247,10 @@ int process_request(int fd, const struct HTTP_Request req) {
 	char	*req_501 = "HTTP/1.1 501 Not Implemented: ";
 
 	char 	resp[2048];
-	char content_type[BUFSIZ];
-	char full_path[strlen(config.root) + strlen(req.request)];
-	int len; 			/* Keep track of location in buffers */
-	int filed;			/* File descriptor for open file */
+	char 	content_type[BUFSIZ];
+	char 	full_path[strlen(config.root) + strlen(req.request)];
+	int 	len; 			/* Keep track of location in buffers */
+	int 	filed;			/* File descriptor for open file */
 	struct stat stat_buf;
 
 	// Test path and retrive content_type
@@ -258,14 +270,14 @@ int process_request(int fd, const struct HTTP_Request req) {
 			len += sprintf(resp + len, "Connection: Keep-alive\r\n\r\n");	
 	}
 
-	if (code == 404) { //Not found
+	if (code == 404) { // Not found
 		len = sprintf(resp, "%s", req_404);
-		len += sprintf(resp + len, "%s\r\n", full_path); 
+		len += sprintf(resp + len, "%s\r\n", req.request); 
 	}
 
-	if (code == 501) { //Unsupported
+	if (code == 501) { // Unsupported
 		len = sprintf(resp, "%s", req_501);
-		len += sprintf(resp + len, "%s\r\n", full_path); 
+		len += sprintf(resp + len, "%s\r\n", req.request); 
 	}
 
 	// Send respnse
@@ -276,9 +288,6 @@ int process_request(int fd, const struct HTTP_Request req) {
 		if ((code = sendfile(fd, filed, (off_t)0, stat_buf.st_size)) < 0)
 			errexit("echo sending file: %s\n", strerror(errno));
 	close(filed);
-
-	//strcpy(resp, "HTTP/1.1 200 OK\n");
-	//printf("Response: %s\n", (char*)resp);
 
 	return 0;
 }
