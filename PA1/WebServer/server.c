@@ -41,7 +41,7 @@ int			interpret(int fd);
 int 		process_request(int fd, const struct HTTP_Request req);
 
 int main(int argc, char *argv[]) {
-	char *conffile = "./sample-ws.conf";
+	char *conffile = "./ws.conf";
 	struct sockaddr_in c_addr; 		/* From address of client */
 	int sock;						/* Server listening socket */
 	int connection;					/* Connection socket */
