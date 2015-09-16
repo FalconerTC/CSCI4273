@@ -23,6 +23,8 @@ struct HTTP_Request {
 	int 	keep_alive;
 };
 
+static const struct HTTP_Request EmptyRequest;
+
 struct Config {
 	char 	portnum[8];
 	char 	root[256];
@@ -150,17 +152,23 @@ int interpret(int fd){
 
 	int	read_len = 0;
 	int 	len = 0;
+
 	/* Holds the state of a request 
 	 * 0 means no request received
-	 * 1 means request initiated, waiting on paramaters
-	*/
+	 * 1 means request initiated, waiting on paramaters */
 	int 	req_state = 0; 
-	int	split_request = 0;
+	/* Maintains whether a request has been parsed for a single token
+	 * 0 means no completed request
+	 * 1 means a complete request has been parsed and will be sent */
+	int 	req_complete = 0;
+	/* Maintains whether a request has been sent. Used for building segmented requests.
+	 * 0 means no request has been sent
+	 * 1 means a request was sent during the last batch */
+	int		req_sent = 0;
 	
 	fd_set set;
 	FD_ZERO(&set);
 	FD_SET(fd, &set);
-
 
 	struct timeval timeout;
 	timeout.tv_sec = 10;
@@ -170,69 +178,89 @@ int interpret(int fd){
 		// Read input from user
 		read_len = recv(fd, &buf[len], (BUFSIZ-len), 0);
 		char 	current[read_len];
-		int 	tokens_read = 0;
+
 		// Copy last received line
 		strncpy(current, &buf[len], sizeof(current));
-		current[read_len-1] = '\0';
 
 		len += read_len;
+
+		// Zero end of array
 		buf[len] = '\0';
-	
+		current[read_len-1] = '\0';
+
 		// Split current buffer line endings
-		char *token = strtok(current, "\n\r");
-		do {
-			if(req_state == 0) {	// Not currently receiving headers
-				// Valid HTTP header received
-				if (!strncmp(token, "GET", 3)) {
-					sscanf(token, "%s %s %s %*s", 
-						req.command, req.request, req.version);
-					req_state = 1;
-					// Unsuported version
-					if (strncmp(req.version, "HTTP/1.0", 8) &&
-						strncmp(req.version, "HTTP/1.1", 8)) {
-						int rlen = sprintf(resp, "%s", req_400_3);
-						rlen += sprintf(resp + rlen, "%s\r\n", req.version); 
-					}
+		char *current_ptr = &current[0];
+		char *token = strsep(&current_ptr, "\n");
 
-				} else { // Invalid request
-					len = 0;
-					strcpy(resp, req_400_1);
-					strcat(resp, token);
-					if (send(fd, resp, strlen(resp), 0) < 0)
-						errexit("echo write: %s\n", strerror(errno));
+		for(token; token != '\0'; token = strsep(&current_ptr, "\n")) {
+			// Remove trailing '\r'
+			if (token[strlen(token)-1] == '\r')
+				token[strlen(token) - 1] = '\0';
+
+			//printf("'%s'\n", token);
+			// Empty line is the end of a request if one has been started
+			if (strlen(token) == 0) {
+				if (req_state == 1)
+					req_complete = 1;
+				else {
+					// Exit loop when no longer receiving input
+					break;
 				}
-			}  else if (req_state == 1) {	// Receiving request headers
-				// NULL is the end of a split request			
-				if (token == NULL)
-					split_request = 1;
-				// Read in host
-				if (token != NULL && !strncmp(token, "Host:", 5)) 
-					sscanf(token, "%*s %s %*s", req.host);
-				// Read in keep-alive
-				if (token != NULL && !strcmp(token, "Connection: keep-alive"))
-					req.keep_alive = 1;
+			} else {
+				if(req_state == 0) {	// Not currently receiving headers
+					// Valid HTTP header received
+					if (!strncmp(token, "GET", 3)) {
+						sscanf(token, "%s %s %s %*s", 
+							req.command, req.request, req.version);
+						req_state = 1;
+						// Unsuported version
+						if (strncmp(req.version, "HTTP/1.0", 8) &&
+							strncmp(req.version, "HTTP/1.1", 8)) {
+							int rlen = sprintf(resp, "%s", req_400_3);
+							rlen += sprintf(resp + rlen, "%s\r\n", req.version); 
+						}
 
-			}
-			token = strtok(NULL, "\n\r");
-			tokens_read++;
-		} while(token != NULL);
+					} else { // Invalid request
+						len = 0;
+						strcpy(resp, req_400_1);
+						strcat(resp, token);
+						if (send(fd, resp, strlen(resp), 0) < 0)
+							errexit("echo write: %s\n", strerror(errno));
+					}
+				}  else if (req_state == 1) {	// Receiving request headers
+					// Read in host
+					if (!strncmp(token, "Host:", 5)) 
+						sscanf(token, "%*s %s %*s", req.host);
+					// Read in keep-alive
+					if (!strcmp(token, "Connection: keep-alive"))
+						req.keep_alive = 1;
 
-		/* HTTP request was captured
-		*/
-		if ((tokens_read > 1 && req_state == 1) || (split_request == 1)) {
-			req_state = 0;
-			if (process_request(fd, req) < 0) {
-				sprintf(resp, "%s", req_500);
-			 	// Send respnse
-				if (write(fd, resp, strlen(resp)) < 0)
-						errexit("echo write: %s\n", strerror(errno));
+				}
 			}
-			// Kill connection
-			if (req.keep_alive == 0)
-				return 0;
-			// Restart buf
-			len = 0;
+
+			/* HTTP request was captured
+			*/
+			if (req_complete == 1) {
+				if (process_request(fd, req) < 0) {
+					sprintf(resp, "%s", req_500);
+				 	// Send respnse
+					if (write(fd, resp, strlen(resp)) < 0)
+							errexit("echo write: %s\n", strerror(errno));
+				}
+
+				// Restart request
+				req = EmptyRequest;
+				req_state = 0;
+				req_complete = 0;
+				req_sent = 1;
+				len = 0;
+			}
 		}
+		// Kill connection
+		if (req.keep_alive == 0 && req_sent == 1)
+			return 0;
+		req_complete = 0;
+		req_sent = 0;
 
 	}
 	if (rv < 0)
