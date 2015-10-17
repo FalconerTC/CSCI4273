@@ -18,6 +18,7 @@ struct Config {
 /* Prototypes */
 int			errexit(const char *format, ...);
 void		parse_conf(const char* conffile);
+void		shell_loop();
 
 /*
  * main - DFS client loop
@@ -29,8 +30,6 @@ int main(int argc, char *argv[]) {
     	case 2:
     		conffile = argv[1];
     		break;
-    	case 1:
-    		/* Fall through */
     	default:
     		fprintf(stderr, "Usage: %s [conf file]\n", argv[0]);
     		exit(1);
@@ -38,7 +37,7 @@ int main(int argc, char *argv[]) {
 
     parse_conf(conffile);
 
-
+    shell_loop();
 
     return(0);
 }
@@ -82,6 +81,42 @@ void parse_conf(const char* conffile){
 		}
 	}
 	config.server_count = server_count;
+}
+
+/*
+ * shell_loop - Client shell for receiving commands
+ * Referene: http://stephen-brennan.com/2015/01/16/write-a-shell-in-c/
+ */
+void shell_loop() {
+	char *line = NULL;		/* Line read from STDIN */
+	char *token;
+	ssize_t len;
+	char command[8], arg[64];
+	int status = 1;
+
+	printf("Servers: %d\n", config.server_count);
+
+	while (status) {
+		printf("%s@DFC> ", config.username);
+		getline(&line, &len, stdin);
+
+
+		sscanf(line, "%s %s", command, arg);
+		if (!strncasecmp(command, "LIST", 4)) {
+
+		}
+		if (!strncasecmp(command, "GET", 3)) {
+
+		}
+		if (!strncasecmp(command, "PUT", 3)) {
+
+		}
+		if (!strncasecmp(command, "EXIT", 4)) {
+			status = 0;
+		}
+		printf("%s\n", command);
+	}
+	printf("Shutting down...\n");
 }
 
 /*
