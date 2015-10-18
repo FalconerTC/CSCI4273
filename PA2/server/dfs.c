@@ -12,6 +12,7 @@
 #define	BUFSIZE	4096
 
 const char *CONF = "./server/dfs.conf";
+const char *DFS_DIR = "./dfs";
 
 /* Structs */
 struct Config {
@@ -23,6 +24,7 @@ struct Config {
 
 /* Prototypes */
 int			interpret(int fd);
+int 		process_put(int fd, char* user, char* file_name);
 int			errexit(const char *format, ...);
 int 		connectsock(const char* portnum, int qlen);
 
@@ -88,19 +90,91 @@ int main(int argc, char *argv[]) {
  * Intrepret - Read, execute, and respond to command from socket
  */
 int interpret(int fd) {
-	char	buf[BUFSIZ];
-	int	cc;
+	char	buf[BUFSIZE];
+	char 	command[8], arg[64];
+	char	username[32], password[32];
+	int		rv = 0;
+	int 	len = 0;
 
-	cc = read(fd, buf, sizeof buf);
-	buf[cc] = '\0';
+	while ((rv = recv(fd, &buf[len], (BUFSIZE-len), 0)) > 0) {
+		char 	current[rv];
+		/* Retrive the last line sent */
+		strncpy(current, &buf[len], sizeof(current));
+		len += rv;
+		/* Zero end of array */
+		current[rv] = '\0';
 
-	if (cc < 0)
-		errexit("echo read: %s\n", strerror(errno));
-	if (cc && write(fd, buf, cc) >= 0)
-		printf("Echo: %s",buf);
+		printf("Found:  %s\n", current);
+
+		/* First request (auth request) */
+		if (len == rv) {
+			sscanf(current, "Username:%s Password:%s", username, password);
+			// TODO interpret credentials
+		} 
+		/* Second request (command request) */
+		else if (len > rv) { 
+			sscanf(current, "%s %s", command, arg);
+
+			if (!strncasecmp(command, "LIST", 4)) {
+
+			} else if (!strncasecmp(command, "GET", 3)) {
+
+			} else if (!strncasecmp(command, "PUT", 3)) {
+				//process_put(fd, username, arg);
+			}
+
+		}
+
+
+		//if (write(fd, current, strlen(current)) < 0)
+		//	errexit("Failed to write: %s\n", strerror(errno));
+	}
+
+	if (username != NULL)
+		printf("User: %s disconnected\n", username);
 	else
-		errexit("echo write: %s\n", strerror(errno));
-	return cc;
+		printf("No more\n");
+	
+	if (rv < 0)
+		errexit("echo read: %s\n", strerror(errno));
+		
+	return rv;
+}
+
+/*
+ * process_put - Receive and save file chunk
+ */
+int process_put(int fd, char* user, char* file_name) {
+	printf("User: %s\n", user);
+	char buf[BUFSIZE];
+	int file_size;
+	char file_loc[128];
+
+	char *auth = "Authenticated. Clear for transfer.";
+	//sprintf(file_loc, "%s/%s", DFS_DIR, config.username);
+
+	printf("File loc: %s\n", file_loc);
+
+	/* Create directory for user */
+	if (access(file_loc, F_OK) == -1)
+		mkdir(file_loc, 0777);
+
+
+	printf("Sending auth\n");
+
+	/* Send authentication reply */
+	if (write(fd, auth, strlen(auth)) < 0)
+		errexit("Failed to write: %s\n", strerror(errno));
+
+	/* Receive file size */
+	int rv;
+	rv = recv(fd, buf, BUFSIZE, 0);
+	file_size = atoi(buf);
+
+
+
+	printf("\nFile size : %d\n", file_size);
+
 }
 
 /*

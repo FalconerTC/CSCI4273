@@ -1,6 +1,6 @@
 #Makefile
 CC = gcc
-CFLAGS =
+CFLAGS = 
 INCLUDE = /usr/lib
 LIBS = 
 

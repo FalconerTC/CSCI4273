@@ -1,18 +1,24 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define	LINELEN			128
 #define REQ_TIMEOUT		1
-#define	BUFSIZE	4096
+#define	BUFSIZE			4096
+
+const char *FILE_DIR = "./upload";
 
 /* Structs */
 struct Config {
@@ -28,7 +34,9 @@ struct Config {
 int			errexit(const char *format, ...);
 void		parse_conf(const char *conffile);
 void		shell_loop();
-int			send_request(const int server_num, char *req);
+int			process_list(char* req);
+int			process_put(char* req);
+int			send_request(const int server_num, char *req, ...);
 int 		connectsock(const char *host, const char *portnum);
 
 /*
@@ -111,7 +119,8 @@ void parse_conf(const char* conffile){
 void shell_loop() {
 	char *line = NULL;		/* Line read from STDIN */
 	char *token;
-	ssize_t len;
+	ssize_t len = 0;
+	ssize_t read;
 	char command[8], arg[64];
 	int status = 1;
 
@@ -119,20 +128,24 @@ void shell_loop() {
 
 	while (status) {
 		printf("%s@DFC> ", config.username);
-		getline(&line, &len, stdin);
+		read = getline(&line, &len, stdin);
+		line[read-1] = '\0';
 
 		sscanf(line, "%s %s", command, arg);
+
+
 		if (!strncasecmp(command, "LIST", 4)) {
-			send_request(0, line);
 
-		}
-		if (!strncasecmp(command, "GET", 3)) {
 
-		}
-		if (!strncasecmp(command, "PUT", 3)) {
+		} else if (!strncasecmp(command, "GET", 3)) {
 
-		}
-		if (!strncasecmp(command, "EXIT", 4)) {
+		} else if (!strncasecmp(command, "PUT", 3)) {
+			//TODO error handling
+			if (strlen(line) == 4)
+				printf("PUT needs an argument\n");
+			else
+				process_put(line);
+		} else if (!strncasecmp(command, "EXIT", 4)) {
 			status = 0;
 		}
 		//printf("%s\n", command);
@@ -141,52 +154,106 @@ void shell_loop() {
 }
 
 /*
- * send_command - Send the request to the specified server 
- * and return the response
+ * process_list - Process send and receive for LIST command
  */
-int send_request(const int server_num, char* req) {
+int process_list(char* req) {
+
+	send_request(0, req);
+
+}
+
+/*
+ * process_put - Process send and receive for PUT command
+ */
+int process_put(char* req) {
+	char command[8], arg[64];
+	char file_loc[128];
+	int fd;
+	struct stat file_stat;
+
+	sscanf(req, "%s %s", command, arg);
+	sprintf(file_loc, "%s/%s", FILE_DIR, arg);
+
+	/* Open file for reading */
+	if ((fd = open(file_loc, O_RDONLY)) < 0)
+		errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
+
+	/* Get file attributes */
+	if (fstat(fd, &file_stat) < 0)
+		errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
+
+	printf("Size: %d\n", file_stat.st_size);
+
+	send_request(0, req, file_stat.st_size);
+}
+
+/*
+ * send_command - Communicate request and response to the specified server
+ */
+int send_request(const int server_num, char* req, ...) {
 	int		sock, n;			/* socket descriptor, read count*/
 	char 	resp[BUFSIZE];
-	int		outchars, inchars;	/* characters sent and received	*/
-	char 	*host = config.server_addrs[server_num];
-	char 	*port = config.server_ports[server_num];
-
-	struct timeval timeout;
-	timeout.tv_sec = REQ_TIMEOUT;
+	char	auth[BUFSIZE];
 	int rv, len;
+	va_list args;
+	struct timeval timeout;
+
+	struct timespec tim;
+	tim.tv_sec = 0;
+	tim.tv_nsec = 100000000L; /* 0.1 seconds */
 
 	/* Make new TCP connection */
-    sock = connectsock(host, port);
+    sock = connectsock(config.server_addrs[server_num], config.server_ports[server_num]);
 
+    /* Keep track of file descriptor */
     fd_set set;
     FD_ZERO(&set);
     FD_SET(sock, &set);
+	timeout.tv_sec = REQ_TIMEOUT;
+	va_start(args, req);
 
-	//outchars = strlen(req);
+	/* Send credentials */
+	int auth_len = 0;
+	auth_len = sprintf(auth, "Username: %s Password: %s", config.username, config.password);
+
+	if (write(sock, auth, strlen(auth)) < 0)
+			errexit("Echo write: %s\n", strerror(errno));
+
+	nanosleep(&tim, NULL); /* Wait 100ms between requests */
 
 	/* Send request */
 	if (write(sock, req, strlen(req)) < 0)
 			errexit("Echo write: %s\n", strerror(errno));
 
+	/* Listen for response */
 	if ((rv = select(sock+1, &set, NULL, NULL, &timeout)) > 0) {
 		len = recv(sock, &resp, BUFSIZE, 0);
-		resp[len-1] = '\0';
+		resp[len] = '\0';
 
 		printf("Found: %s\n", resp);
+
+		/* Send file chunk */
+		if (!strncmp(resp, "Authenticated. Clear for transfer.", 34)) {
+			char file_size[256];
+			sprintf(file_size, "%d", va_arg(args, off_t));
+
+			/* Send file size */
+			if (write(sock, file_size, sizeof(file_size)) < 0)
+				errexit("Echo write: %s\n", strerror(errno));
+
+		}
+
+
 		return 0;
 	}
 	if (rv < 0)
 		errexit("Error in select: %s\n", strerror(errno));
-	/* Timeout */
-	printf("Connection to server %s timed-out after %d seconds\n", 
-			config.server_names[server_num], REQ_TIMEOUT);
-	return 1;
+	else if (rv == 0) /* Timeout */
+		printf("Connection to server %s timed-out after %d seconds\n", 
+				config.server_names[server_num], REQ_TIMEOUT);
 
-	/* read it back */
-	/*for (inchars = 0; inchars < outchars; inchars+=n ) {
-		n = read(sock, &req[inchars], outchars - inchars);
-	}
-	fputs(req, stdout);*/
+	va_end(args);
+	return 1;
 }
 
 /*
