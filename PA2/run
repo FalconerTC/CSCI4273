@@ -1,0 +1,8 @@
+#!/bin/sh
+echo "Calling make..."
+make all
+echo ""
+echo "Running servers"
+./dfs /DFS1 10001 &
+echo "Run client with"
+echo "\t./dfc client/dfc1.conf"
