@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -31,12 +32,12 @@ struct Config {
 } config;
 
 /* Prototypes */
-int			errexit(const char *format, ...);
 void		parse_conf(const char *conffile);
 void		shell_loop();
 int			process_list(char* req);
 int			process_put(char* req);
 int			send_request(const int server_num, char *req, ...);
+int			errexit(const char *format, ...);
 int 		connectsock(const char *host, const char *portnum);
 
 /*
@@ -58,7 +59,6 @@ int main(int argc, char *argv[]) {
 
     parse_conf(conffile);
 
-
     //send_request("127.0.0.1", port);
 
     shell_loop();
@@ -78,13 +78,13 @@ void parse_conf(const char* conffile){
 	char head[64], middle[64], tail[64];
 	int server_count = 0;
 
-	// Open config file
+	/* Open config file */
 	if ((cfile = fopen(conffile, "r")) == NULL)
 		errexit("Failed opening config at: '%s' %s\n", conffile, strerror(errno));
-	// Iterate by line
+	/* Iterate by line */
 	while((read_len = getline(&line, &len, cfile)) != -1) {
 		line[read_len-1] = '\0';
-		// Ignore comments
+		/* Ignore comments */
 		if (line[0] == '#')
 			continue;
 		sscanf(line, "%s %s %s", head, middle, tail);
@@ -158,7 +158,7 @@ void shell_loop() {
  */
 int process_list(char* req) {
 
-	send_request(0, req);
+	//send_request(0, req);
 
 }
 
@@ -182,9 +182,12 @@ int process_put(char* req) {
 	if (fstat(fd, &file_stat) < 0)
 		errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
 
-	printf("Size: %d\n", file_stat.st_size);
+	close(fd);
 
-	send_request(0, req, file_stat.st_size);
+	printf("Size: %ld\n", file_stat.st_size);
+
+	/* Send additional paramaters: file size, file location, offset */
+	send_request(0, req, file_stat.st_size, file_loc, 0);
 }
 
 /*
@@ -219,7 +222,8 @@ int send_request(const int server_num, char* req, ...) {
 	if (write(sock, auth, strlen(auth)) < 0)
 			errexit("Echo write: %s\n", strerror(errno));
 
-	nanosleep(&tim, NULL); /* Wait 100ms between requests */
+	/* Wait 100ms between requests */
+	nanosleep(&tim, NULL);
 
 	/* Send request */
 	if (write(sock, req, strlen(req)) < 0)
@@ -234,12 +238,42 @@ int send_request(const int server_num, char* req, ...) {
 
 		/* Send file chunk */
 		if (!strncmp(resp, "Authenticated. Clear for transfer.", 34)) {
-			char file_size[256];
-			sprintf(file_size, "%d", va_arg(args, off_t));
+			char file_size[256];		/* Amount of bytes to take from file */
+			char *file_loc;				/* Location of file */
+			off_t offset;				/* Offset in file for chunk */
+			int sent = 0;				/* Bytes sent */
+			int fd;	
+			int remaining = va_arg(args, off_t);
+			struct stat file_stat;
+
+			/* Read in additional params */
+			sprintf(file_size, "%d", remaining);
+			file_loc = va_arg(args, char *);
+            //offset = va_arg(args, int);
+            offset = 0;
+
+			printf("%s %d %s\n", file_size, remaining, file_loc);
 
 			/* Send file size */
 			if (write(sock, file_size, sizeof(file_size)) < 0)
 				errexit("Echo write: %s\n", strerror(errno));
+
+			/* Wait 100ms between requests */
+			nanosleep(&tim, NULL); 
+
+			/* Open file for reading */
+			if ((fd = open(file_loc, O_RDONLY)) < 0)
+				errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
+
+			/* Get file attributes */
+			if (fstat(fd, &file_stat) < 0)
+				errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
+
+			while (((sent = sendfile(sock, fd, &offset, BUFSIZE)) >= 0) && (remaining > 0)) {
+				remaining -= sent;
+				printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
+			}
+
 
 		}
 

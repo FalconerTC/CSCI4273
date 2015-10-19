@@ -1,5 +1,6 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <netinet/in.h>
 
 #include <stdio.h>
@@ -11,8 +12,7 @@
 #define QLEN 32		/* Maximum connections */
 #define	BUFSIZE	4096
 
-const char *CONF = "./server/dfs.conf";
-const char *DFS_DIR = "./dfs";
+const char *CONF_FILE = "./server/dfs.conf";
 
 /* Structs */
 struct Config {
@@ -23,6 +23,7 @@ struct Config {
 } config;
 
 /* Prototypes */
+void		parse_conf(const char *conffile);
 int			interpret(int fd);
 int 		process_put(int fd, char* user, char* file_name);
 int			errexit(const char *format, ...);
@@ -52,7 +53,7 @@ int main(int argc, char *argv[]) {
 			exit(1);
 	}
 
-	//parse_conf(CONF);
+	parse_conf(CONF_FILE);
 
 	sock = connectsock(port, QLEN);
 
@@ -84,6 +85,44 @@ int main(int argc, char *argv[]) {
 				}
 	}
 
+}
+
+/*
+ * parse_conf - Read in user supplied config file
+ */
+void parse_conf(const char* conffile){
+	FILE *cfile;			/* Config file */
+	char* line;				/* Current line */
+	char* token;			/* Current token */
+	int read_len = 0;		/* Length read per line */
+	size_t len = 0;
+	char head[64], tail[64];
+	int user_count = 0;
+
+	// Open config file
+	if ((cfile = fopen(conffile, "r")) == NULL)
+		errexit("Failed opening config at: '%s' %s\n", conffile, strerror(errno));
+	// Iterate by line
+	while((read_len = getline(&line, &len, cfile)) != -1) {
+		line[read_len-1] = '\0';
+		// Ignore comments
+		if (line[0] == '#')
+			continue;
+		sscanf(line, "%s %s", head, tail);
+		/* Parse FileDirectory */
+		if (!strncmp(head, "FileDirectory", 13)) {
+			strcpy(config.file_dir, tail);
+		} 
+		/* Parse user list */
+		else {
+			if (user_count < 8) {
+				strcpy(config.server_users[user_count], head);
+				strcpy(config.server_passwords[user_count++], tail);
+			}
+		}
+
+	}
+	config.user_count = user_count;
 }
 
 /*
@@ -120,11 +159,10 @@ int interpret(int fd) {
 			} else if (!strncasecmp(command, "GET", 3)) {
 
 			} else if (!strncasecmp(command, "PUT", 3)) {
-				//process_put(fd, username, arg);
+				process_put(fd, username, arg);
 			}
 
 		}
-
 
 		//if (write(fd, current, strlen(current)) < 0)
 		//	errexit("Failed to write: %s\n", strerror(errno));
@@ -143,24 +181,28 @@ int interpret(int fd) {
 
 /*
  * process_put - Receive and save file chunk
+ * Refernce - http://stackoverflow.com/questions/11952898/c-send-and-receive-file
  */
 int process_put(int fd, char* user, char* file_name) {
 	printf("User: %s\n", user);
 	char buf[BUFSIZE];
 	int file_size;
+	int remaining;
+	int len;
 	char file_loc[128];
+	FILE *file;
 
 	char *auth = "Authenticated. Clear for transfer.";
-	//sprintf(file_loc, "%s/%s", DFS_DIR, config.username);
-
-	printf("File loc: %s\n", file_loc);
+	sprintf(file_loc, "%s/%s", config.file_dir, user);
 
 	/* Create directory for user */
 	if (access(file_loc, F_OK) == -1)
-		mkdir(file_loc, 0777);
+		mkdir(file_loc, 0700);
 
+	sprintf(file_loc, "%s/%s", file_loc, file_name);
+	//strcat(file_loc, file_name);
 
-	printf("Sending auth\n");
+	printf("Sending auth %s\n", file_loc);
 
 	/* Send authentication reply */
 	if (write(fd, auth, strlen(auth)) < 0)
@@ -168,12 +210,27 @@ int process_put(int fd, char* user, char* file_name) {
 
 	/* Receive file size */
 	int rv;
-	rv = recv(fd, buf, BUFSIZE, 0);
+	if ((rv = recv(fd, buf, BUFSIZE, 0)) < 0) 
+		errexit("Failed to receive file size: %s\n", strerror(errno));
 	file_size = atoi(buf);
 
-
-
 	printf("\nFile size : %d\n", file_size);
+
+	/* Open file for writing */
+	if ((file = fopen(file_loc, "w")) < 0)
+		errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
+
+	remaining = file_size;
+
+	/* Receive and save file chunk */
+	while (((len = recv(fd, buf, BUFSIZE, 0)) > 0) && (remaining > 0)) {
+		fwrite(buf, sizeof(char), len, file);
+		remaining -= len;
+		fprintf(stdout, "Received %d bytes\n", len);
+	}
+
+	 fclose(file);
+
 
 }
 
