@@ -14,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <openssl/md5.h>
 
 #define	LINELEN			128
 #define REQ_TIMEOUT		1
@@ -35,7 +36,7 @@ struct Config {
 void		parse_conf(const char *conffile);
 void		shell_loop();
 int			process_list(char* req);
-int			process_put(char* req);
+int			process_put(char* file_name);
 int			send_request(const int server_num, char *req, ...);
 int			errexit(const char *format, ...);
 int 		connectsock(const char *host, const char *portnum);
@@ -136,15 +137,14 @@ void shell_loop() {
 
 		if (!strncasecmp(command, "LIST", 4)) {
 
-
 		} else if (!strncasecmp(command, "GET", 3)) {
 
 		} else if (!strncasecmp(command, "PUT", 3)) {
 			//TODO error handling
-			if (strlen(line) == 4)
+			if (strlen(line) <= 4)
 				printf("PUT needs an argument\n");
 			else
-				process_put(line);
+				process_put(arg);
 		} else if (!strncasecmp(command, "EXIT", 4)) {
 			status = 0;
 		}
@@ -164,15 +164,27 @@ int process_list(char* req) {
 
 /*
  * process_put - Process send and receive for PUT command
+  * Reference - http://stackoverflow.com/questions/10324611/how-to-calculate-the-md5-hash-of-a-large-file-in-c
  */
-int process_put(char* req) {
-	char command[8], arg[64];
+int process_put(char* file_name) {
+	//char command[8], arg[64];
+	char req[128];
 	char file_loc[128];
 	int fd;
 	struct stat file_stat;
+	long size;						/* File size */
+	int rv;							/* Holds number of bytes read */
+	char buf[BUFSIZE];				/* Holds bytes read from file */
+	MD5_CTX mdContext;				/* MD5 object */
+	char byte[1];
+	char sum[MD5_DIGEST_LENGTH];	/* Holds MD5 sum */
+	int order;						/* Defines the order of file splitting between server */
+	int order_mat[config.server_count][2];
+	//int count = config.server_count;
+	int count = 1;
+	int i;
 
-	sscanf(req, "%s %s", command, arg);
-	sprintf(file_loc, "%s/%s", FILE_DIR, arg);
+	sprintf(file_loc, "%s/%s", FILE_DIR, file_name);
 
 	/* Open file for reading */
 	if ((fd = open(file_loc, O_RDONLY)) < 0)
@@ -181,13 +193,51 @@ int process_put(char* req) {
 	/* Get file attributes */
 	if (fstat(fd, &file_stat) < 0)
 		errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
+	size = file_stat.st_size;
+
+	/* Get MD5sum of file to select server order */
+	MD5_Init(&mdContext);
+	while ((rv = read(fd, &buf, BUFSIZE)) != 0)
+		MD5_Update(&mdContext, buf, rv);
+	MD5_Final(sum, &mdContext);
+	/* Use modulus on first byte of MD5 hash */
+	sprintf(byte, "%02x", sum[0]);
+	order = (strtol(byte, NULL, 16) % count);
 
 	close(fd);
 
-	printf("Size: %ld\n", file_stat.st_size);
+	/* Calculate order matrix
+	 * (4 X 2) Piece number X Server number
+	 */
+	 for (i = 1; i < count + 1; i++) {
+	 	order_mat[(i % count)][0] = i-1;
+	 	order_mat[(i % count)][1] = (i % count);
+	 }
+	printf("Size: %ld Using: %ld\n", size, size / count);
 
-	/* Send additional paramaters: file size, file location, offset */
-	send_request(0, req, file_stat.st_size, file_loc, 0);
+	/* Format new filename */
+	sprintf(req, "PUT .%s.", file_name);
+
+	/* Send requests 
+	 * Include additional paramaters: file size, file location, offset
+	 */
+	int offset = 0;
+	char piece_name[128];
+	for (i = 0; i < count - 1; i++) {
+		sprintf(piece_name, "%s%d", req, i+1);
+
+		printf("Sending '%s' request\n", piece_name);
+
+		send_request(order_mat[i][0], piece_name, (size/count), file_loc, offset);
+		send_request(order_mat[i][1], piece_name, (size/count), file_loc, offset);
+		offset += (size/count);
+	}
+	sprintf(piece_name, "%s%d", req, count);
+
+	/* Send remaining data in last chunk */
+	send_request(order_mat[count-1][0], piece_name, (size - offset), file_loc, offset);
+	send_request(order_mat[count-1][1], piece_name, (size - offset), file_loc, offset);
+	
 }
 
 /*
@@ -219,8 +269,11 @@ int send_request(const int server_num, char* req, ...) {
 	int auth_len = 0;
 	auth_len = sprintf(auth, "Username: %s Password: %s", config.username, config.password);
 
-	if (write(sock, auth, strlen(auth)) < 0)
-			errexit("Echo write: %s\n", strerror(errno));
+	if (write(sock, auth, strlen(auth)) < 0) {
+		printf("Connection to server %s unavailable\n", 
+				config.server_names[server_num]);
+		return 1;
+	}
 
 	/* Wait 100ms between requests */
 	nanosleep(&tim, NULL);
@@ -234,7 +287,7 @@ int send_request(const int server_num, char* req, ...) {
 		len = recv(sock, &resp, BUFSIZE, 0);
 		resp[len] = '\0';
 
-		printf("Found: %s\n", resp);
+		//printf("Found: %s\n", resp);
 
 		/* Send file chunk */
 		if (!strncmp(resp, "Authenticated. Clear for transfer.", 34)) {
@@ -249,10 +302,10 @@ int send_request(const int server_num, char* req, ...) {
 			/* Read in additional params */
 			sprintf(file_size, "%d", remaining);
 			file_loc = va_arg(args, char *);
-            //offset = va_arg(args, int);
-            offset = 0;
+            offset = va_arg(args, int);
+            //offset = 0;
 
-			printf("%s %d %s\n", file_size, remaining, file_loc);
+			printf("size: %s remaining: %d %s\n", file_size, remaining, file_loc);
 
 			/* Send file size */
 			if (write(sock, file_size, sizeof(file_size)) < 0)
@@ -269,13 +322,17 @@ int send_request(const int server_num, char* req, ...) {
 			if (fstat(fd, &file_stat) < 0)
 				errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
 
-			while (((sent = sendfile(sock, fd, &offset, BUFSIZE)) >= 0) && (remaining > 0)) {
+			printf("offset %ld\n", offset);
+			/* Send file chunk */
+			while (((sent = sendfile(sock, fd, &offset, remaining)) >= 0) && (remaining > 0)) {
 				remaining -= sent;
 				printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
 			}
 
 
 		}
+
+		//GET
 
 
 		return 0;

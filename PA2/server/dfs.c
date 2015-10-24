@@ -1,6 +1,7 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 
 #include <stdio.h>
@@ -23,7 +24,7 @@ struct Config {
 } config;
 
 /* Prototypes */
-void		parse_conf(const char *conffile);
+void		parse_conf(const char *conffile, const char* server_dir);
 int			interpret(int fd);
 int 		process_put(int fd, char* user, char* file_name);
 int			errexit(const char *format, ...);
@@ -34,7 +35,7 @@ int 		connectsock(const char* portnum, int qlen);
  * main - DFS server loop
  */
 int main(int argc, char *argv[]) {
-	char *directory;
+	char *server_dir;
 	char *port;
 	struct sockaddr_in c_addr; 		/* From address of client */
 	int sock;						/* Server listening socket */
@@ -45,15 +46,15 @@ int main(int argc, char *argv[]) {
 
 	switch(argc) {
 		case 3:
-			directory = argv[1];
+			server_dir = argv[1];
 			port = argv[2];
 			break;
 		default:
-			fprintf(stderr, "Usage: %s [dir-name] [port]\n", argv[0]);
+			fprintf(stderr, "Usage: %s [server-dir] [port]\n", argv[0]);
 			exit(1);
 	}
 
-	parse_conf(CONF_FILE);
+	parse_conf(CONF_FILE, server_dir);
 
 	sock = connectsock(port, QLEN);
 
@@ -90,7 +91,7 @@ int main(int argc, char *argv[]) {
 /*
  * parse_conf - Read in user supplied config file
  */
-void parse_conf(const char* conffile){
+void parse_conf(const char* conffile, const char* server_dir){
 	FILE *cfile;			/* Config file */
 	char* line;				/* Current line */
 	char* token;			/* Current token */
@@ -110,8 +111,8 @@ void parse_conf(const char* conffile){
 			continue;
 		sscanf(line, "%s %s", head, tail);
 		/* Parse FileDirectory */
-		if (!strncmp(head, "FileDirectory", 13)) {
-			strcpy(config.file_dir, tail);
+		if (!strncmp(head, "ServerRoot", 10)) {
+			sprintf(config.file_dir, "%s/%s", tail, server_dir);
 		} 
 		/* Parse user list */
 		else {
@@ -161,11 +162,9 @@ int interpret(int fd) {
 			} else if (!strncasecmp(command, "PUT", 3)) {
 				process_put(fd, username, arg);
 			}
-
+			// Close socket on command completion
+			break;
 		}
-
-		//if (write(fd, current, strlen(current)) < 0)
-		//	errexit("Failed to write: %s\n", strerror(errno));
 	}
 
 	if (username != NULL)
@@ -193,6 +192,11 @@ int process_put(int fd, char* user, char* file_name) {
 	FILE *file;
 
 	char *auth = "Authenticated. Clear for transfer.";
+
+	/* Create directory for server */
+	if (access(config.file_dir, F_OK) == -1)
+		mkdir(config.file_dir, 0700);
+
 	sprintf(file_loc, "%s/%s", config.file_dir, user);
 
 	/* Create directory for user */
@@ -200,7 +204,6 @@ int process_put(int fd, char* user, char* file_name) {
 		mkdir(file_loc, 0700);
 
 	sprintf(file_loc, "%s/%s", file_loc, file_name);
-	//strcat(file_loc, file_name);
 
 	printf("Sending auth %s\n", file_loc);
 
@@ -223,15 +226,12 @@ int process_put(int fd, char* user, char* file_name) {
 	remaining = file_size;
 
 	/* Receive and save file chunk */
-	while (((len = recv(fd, buf, BUFSIZE, 0)) > 0) && (remaining > 0)) {
+	while ((remaining > 0) && ((len = recv(fd, buf, BUFSIZE, 0)) > 0)) {
 		fwrite(buf, sizeof(char), len, file);
 		remaining -= len;
-		fprintf(stdout, "Received %d bytes\n", len);
+		printf("Received %d bytes\n", len);
 	}
-
-	 fclose(file);
-
-
+	fclose(file);
 }
 
 /*
