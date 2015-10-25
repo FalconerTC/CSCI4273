@@ -233,7 +233,9 @@ int process_get(int fd, char* user, char* file_name) {
 
 	/* Format file count message */
 	char file_msg[32];
-	sprintf(file_msg, "%d", file_count);
+	sprintf(file_msg, "Files: %d", file_count);
+
+	printf("Sending: %s\n", file_msg);
 
 	/* Send file count */
 	if (write(fd, file_msg, strlen(file_msg)) < 0)

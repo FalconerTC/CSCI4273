@@ -1,4 +1,6 @@
 #!/bin/sh
+echo "Creating server RootDir"
+mkdir ./DFS
 echo "Calling make..."
 make all
 echo ""

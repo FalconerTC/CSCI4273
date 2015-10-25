@@ -9,3 +9,7 @@ dfs
 *.c~
 *.out
 DFS/*
+
+# Special
+retrieval/*
+!.file

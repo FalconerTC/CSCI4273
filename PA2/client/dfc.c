@@ -22,6 +22,7 @@
 #define	BUFSIZE			4096
 
 const char *FILE_DIR = "./upload";
+const char *RETRIEVE_DIR = "./retrieval";
 
 /* Structs */
 struct Config {
@@ -171,28 +172,118 @@ int process_list(char* req) {
  * GET retrieves chunks for a file and saves the rebuilt file
  */
 int process_get(char* file_name) {
+	FILE *file;
+	int count = config.server_count;
 	char req[128];
-	char chunk1[BUFSIZE];
-	char chunk2[BUFSIZE];
-	char chunk_buf[BUFSIZE];
-	int index1;
-	int index2;
+	char chunk[count][BUFSIZE];
+	char chunk_buf1[BUFSIZE];
+	char chunk_buf2[BUFSIZE];
+	int indexes[count];
+	char file_buf[count*BUFSIZE];
 	int ret = 0;
+	int pieces = 0;
 
 	sprintf(req, "GET .%s.", file_name);
-	sprintf(chunk_buf, "%p %p", &chunk1, &chunk2);
 
-	if ((ret = send_request(0, req, chunk_buf)) < 0) {
-		printf("Req failed\n");
+	/* Generate random starting primary server */
+	srand(time(NULL));
+	int start = ((rand() % 2) * 2);
+	printf("rand: %d\n", start);
+
+	/* Send buf pointers as char array to get past va_args limitations */
+	sprintf(chunk_buf1, "%p %p", &(chunk[0]), &(chunk[1]));
+	sprintf(chunk_buf2, "%p %p", &(chunk[2]), &(chunk[3]));
+
+	/* Request first primary server */
+	if ((ret = send_request(start, req, chunk_buf1)) < 0) {
+		printf("Failed: Trying secondary server %d\n", start+1);
+		/* Request first secondary server */
+		if ((ret = send_request(start+1, req, chunk_buf1)) < 0) {
+			printf("File is incomplete\n");
+			return 1;
+		} else {
+			/* Read indexes from return code */
+			indexes[0] = ret % 10;
+			indexes[1] = ret / 10;
+			pieces +=2;
+		}
+
+		/* Request second secondary server */
+		if ((ret = send_request((start+3)%count, req, chunk_buf2)) < 0) {
+			printf("File is incomplete\n");
+			return 1;
+		} else {
+			/* Read indexes from return code */
+			indexes[2] = ret % 10;
+			indexes[3] = ret / 10;
+			pieces +=2;
+		}
+
+	} else {
+		/* Read indexes from return code */
+		indexes[0] = ret % 10;
+		indexes[1] = ret / 10;
+		pieces +=2;
 	}
 
-	/* Read indexes from return code */
-	index1 = ret % 10;
-	index2 = ret / 10;
+	if (pieces < count) {
+		/* Request second primary server */
+		if ((ret = send_request((start+2)%count, req, chunk_buf2)) < 0) {
+			printf("Failed: Trying secondary server %d\n", start+1);
+			/* Request first secondary server */
+			if ((ret = send_request(start+1, req, chunk_buf1)) < 0) {
+				printf("File is incomplete\n");
+				return 1;
+			} else {
+				/* Read indexes from return code */
+				indexes[0] = ret % 10;
+				indexes[1] = ret / 10;
+				pieces +=2;
+			}
 
-	printf("Buf: %s %d\n", chunk1, index1);
-	printf("Buf: %s %d\n", chunk2, index2);
+			/* Request second secondary server */
+			if ((ret = send_request((start+3)%count, req, chunk_buf2)) < 0) {
+				printf("File is incomplete\n");
+				return 1;
+			} else {
+				/* Read indexes from return code */
+				indexes[2] = ret % 10;
+				indexes[3] = ret / 10;
+				pieces +=2;
+			}
+		} else {
+			/* Read indexes from return code */
+			indexes[2] = ret % 10;
+			indexes[3] = ret / 10;
+			pieces +=2;
+		}
+	}
 
+	/* Build string buffer */
+	strcpy(file_buf, "\0");
+	int piece = 1;
+	int i;
+	for(i = 0; piece < count+1; i++) {
+		if (indexes[i] == piece) {
+			strcat(file_buf, chunk[i]);
+			i = -1;
+			piece++;
+		}
+		if (i == count) 
+			break;
+	}
+
+	/* Format save file string */
+	char file_loc[BUFSIZE];
+	sprintf(file_loc, "%s/%s", RETRIEVE_DIR, file_name);
+
+	/* Open file for writing */
+	if ((file = fopen(file_loc, "w")) < 0)
+		errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
+
+	fwrite(file_buf, sizeof(char), strlen(file_buf), file);
+
+	fclose(file);
 }
 
 /*
@@ -214,7 +305,7 @@ int process_put(char* file_name) {
 	int order;						/* Defines the order of file splitting between server */
 	int order_mat[config.server_count][2];
 	//int count = config.server_count;
-	int count = 1;
+	int count = 4;
 	int i;
 
 	sprintf(file_loc, "%s/%s", FILE_DIR, file_name);
@@ -256,14 +347,18 @@ int process_put(char* file_name) {
 	 */
 	int offset = 0;
 	char piece_name[128];
+
 	for (i = 0; i < count - 1; i++) {
+		int chunk_size = (size/count);
+		if (chunk_size % 2 == 1)
+			chunk_size--;
 		sprintf(piece_name, "%s%d", req, i+1);
 
 		printf("Sending '%s' request\n", piece_name);
 
-		send_request(order_mat[i][0], piece_name, (size/count), file_loc, offset);
-		send_request(order_mat[i][1], piece_name, (size/count), file_loc, offset);
-		offset += (size/count);
+		send_request(order_mat[i][0], piece_name, chunk_size, file_loc, offset);
+		send_request(order_mat[i][1], piece_name, chunk_size, file_loc, offset);
+		offset += chunk_size;
 	}
 	sprintf(piece_name, "%s%d", req, count);
 
@@ -305,7 +400,7 @@ int send_request(const int server_num, char* req, ...) {
 	if (write(sock, auth, strlen(auth)) < 0) {
 		printf("Connection to server %s unavailable\n", 
 				config.server_names[server_num]);
-		return 1;
+		return -1;
 	}
 
 	/* Wait 100ms between requests */
@@ -355,7 +450,7 @@ int send_request(const int server_num, char* req, ...) {
 			if (fstat(fd, &file_stat) < 0)
 				errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
 
-			printf("offset %ld\n", offset);
+			//printf("offset %ld\n", offset);
 			/* Send file chunk */
 			while (((sent = sendfile(sock, fd, &offset, remaining)) >= 0) && (remaining > 0)) {
 				remaining -= sent;
@@ -369,7 +464,7 @@ int send_request(const int server_num, char* req, ...) {
 			int 	files_recv = 0;
 			int 	remaining;
 			char 	*chunks[2];
-			int 	ret;			/* Hold return value */
+			int 	ret = 0;			/* Hold return value */
 
 			char *ptrs = va_arg(args, char *);
 			sscanf(ptrs, "%p %p", &chunks[0], &chunks[1]);
@@ -377,7 +472,11 @@ int send_request(const int server_num, char* req, ...) {
 			/* Receive file count */
 			if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0) 
 				errexit("Failed to receive file size: %s\n", strerror(errno));
-			file_count = atoi(buf);
+
+			printf("Received: %s\n", buf);
+
+			sscanf(buf, "Files: %d", &file_count);
+			//file_count = atoi(buf);
 
 			printf("Files: %d\n", file_count);
 
@@ -392,7 +491,7 @@ int send_request(const int server_num, char* req, ...) {
 				sscanf(buf, "%d %d", &file_size, &index);
 				//file_size = atoi(buf);
 
-				printf("Size:  %d Index: %d\n", file_size, index);
+				//printf("Size:  %d Index: %d\n", file_size, index);
 
 				remaining = file_size;
 				char chunk_buf[file_size];
@@ -400,17 +499,17 @@ int send_request(const int server_num, char* req, ...) {
 				/* Receive file chunk*/
 				while ((remaining > 0) && ((len = recv(sock, chunk_buf, BUFSIZE, 0)) > 0)) {
 					remaining -= len;
-					printf("Received %d bytes\n", len);
+					//printf("Received %d bytes, remaining %d\n", len, remaining);
 				}
-
+				chunk_buf[file_size] = '\0';
 				strcpy(chunks[files_recv], chunk_buf);
 				ret += (pow(10, files_recv)*index);
+
 				files_recv++;
 			}
 			printf("Done %d\n", ret);
 			va_end(args);
 			return ret;
-			printf("Done %d\n", ret);
 
 		}
 
@@ -426,7 +525,7 @@ int send_request(const int server_num, char* req, ...) {
 				config.server_names[server_num], REQ_TIMEOUT);
 
 	va_end(args);
-	return 1;
+	return -1;
 }
 
 /*
