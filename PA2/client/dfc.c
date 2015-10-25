@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 
 #include <time.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -36,6 +37,7 @@ struct Config {
 void		parse_conf(const char *conffile);
 void		shell_loop();
 int			process_list(char* req);
+int 		process_get(char* file_name);
 int			process_put(char* file_name);
 int			send_request(const int server_num, char *req, ...);
 int			errexit(const char *format, ...);
@@ -138,9 +140,11 @@ void shell_loop() {
 		if (!strncasecmp(command, "LIST", 4)) {
 
 		} else if (!strncasecmp(command, "GET", 3)) {
-
+			if (strlen(line) <= 4)
+				printf("GET needs an argument\n");
+			else
+				process_get(arg);
 		} else if (!strncasecmp(command, "PUT", 3)) {
-			//TODO error handling
 			if (strlen(line) <= 4)
 				printf("PUT needs an argument\n");
 			else
@@ -163,11 +167,40 @@ int process_list(char* req) {
 }
 
 /*
+ * process_get - Process send and receive for GET command
+ * GET retrieves chunks for a file and saves the rebuilt file
+ */
+int process_get(char* file_name) {
+	char req[128];
+	char chunk1[BUFSIZE];
+	char chunk2[BUFSIZE];
+	char chunk_buf[BUFSIZE];
+	int index1;
+	int index2;
+	int ret = 0;
+
+	sprintf(req, "GET .%s.", file_name);
+	sprintf(chunk_buf, "%p %p", &chunk1, &chunk2);
+
+	if ((ret = send_request(0, req, chunk_buf)) < 0) {
+		printf("Req failed\n");
+	}
+
+	/* Read indexes from return code */
+	index1 = ret % 10;
+	index2 = ret / 10;
+
+	printf("Buf: %s %d\n", chunk1, index1);
+	printf("Buf: %s %d\n", chunk2, index2);
+
+}
+
+/*
  * process_put - Process send and receive for PUT command
-  * Reference - http://stackoverflow.com/questions/10324611/how-to-calculate-the-md5-hash-of-a-large-file-in-c
+ * PUT chunks a file between servers and sends the chunks
+ * Reference - http://stackoverflow.com/questions/10324611/how-to-calculate-the-md5-hash-of-a-large-file-in-c
  */
 int process_put(char* file_name) {
-	//char command[8], arg[64];
 	char req[128];
 	char file_loc[128];
 	int fd;
@@ -287,9 +320,9 @@ int send_request(const int server_num, char* req, ...) {
 		len = recv(sock, &resp, BUFSIZE, 0);
 		resp[len] = '\0';
 
-		//printf("Found: %s\n", resp);
+		printf("Found: %s\n", resp);
 
-		/* Send file chunk */
+		/* Process PUT */
 		if (!strncmp(resp, "Authenticated. Clear for transfer.", 34)) {
 			char file_size[256];		/* Amount of bytes to take from file */
 			char *file_loc;				/* Location of file */
@@ -328,11 +361,60 @@ int send_request(const int server_num, char* req, ...) {
 				remaining -= sent;
 				printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
 			}
+		}
+		/* Process GET */
+		else if (!strncmp(resp, "Authenticated. Sending files.", 29)) {
+			char	buf[BUFSIZE];
+			int		file_count = 0;
+			int 	files_recv = 0;
+			int 	remaining;
+			char 	*chunks[2];
+			int 	ret;			/* Hold return value */
 
+			char *ptrs = va_arg(args, char *);
+			sscanf(ptrs, "%p %p", &chunks[0], &chunks[1]);
+
+			/* Receive file count */
+			if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0) 
+				errexit("Failed to receive file size: %s\n", strerror(errno));
+			file_count = atoi(buf);
+
+			printf("Files: %d\n", file_count);
+
+
+			while (files_recv < file_count) {
+				int file_size = 0;
+				int index;
+
+				/* Receive file size */
+				if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0)
+					errexit("Failed to receive file: %s\n", strerror(errno));
+				sscanf(buf, "%d %d", &file_size, &index);
+				//file_size = atoi(buf);
+
+				printf("Size:  %d Index: %d\n", file_size, index);
+
+				remaining = file_size;
+				char chunk_buf[file_size];
+
+				/* Receive file chunk*/
+				while ((remaining > 0) && ((len = recv(sock, chunk_buf, BUFSIZE, 0)) > 0)) {
+					remaining -= len;
+					printf("Received %d bytes\n", len);
+				}
+
+				strcpy(chunks[files_recv], chunk_buf);
+				ret += (pow(10, files_recv)*index);
+				files_recv++;
+			}
+			printf("Done %d\n", ret);
+			va_end(args);
+			return ret;
+			printf("Done %d\n", ret);
 
 		}
 
-		//GET
+
 
 
 		return 0;

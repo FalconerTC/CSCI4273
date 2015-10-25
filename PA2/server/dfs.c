@@ -3,12 +3,16 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
+#include <dirent.h>
+#include <time.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+
 
 #define QLEN 32		/* Maximum connections */
 #define	BUFSIZE	4096
@@ -26,6 +30,7 @@ struct Config {
 /* Prototypes */
 void		parse_conf(const char *conffile, const char* server_dir);
 int			interpret(int fd);
+int 		process_get(int fd, char* user, char* file_name);
 int 		process_put(int fd, char* user, char* file_name);
 int			errexit(const char *format, ...);
 int 		connectsock(const char* portnum, int qlen);
@@ -158,7 +163,7 @@ int interpret(int fd) {
 			if (!strncasecmp(command, "LIST", 4)) {
 
 			} else if (!strncasecmp(command, "GET", 3)) {
-
+				process_get(fd, username, arg);
 			} else if (!strncasecmp(command, "PUT", 3)) {
 				process_put(fd, username, arg);
 			}
@@ -179,11 +184,110 @@ int interpret(int fd) {
 }
 
 /*
+ * process_get - Find and send file chunks
+ */
+int process_get(int fd, char* user, char* file_name) {
+	DIR *dir;
+	int chunkd;				/* File descriptor for current chunk */
+	struct dirent *ent;
+	char files_dir[128];
+	char files[8][64];		/* Holds names of chunks to send */
+	int chunk_nums[8];
+	int file_count = 0;		/* Holds total chunks found */
+	int files_sent = 0;		/* Total file chunks sent */
+	struct timeval timeout;
+	struct stat file_stat;
+	int sent = 0;
+	off_t offset;
+
+	struct timespec tim;
+	tim.tv_sec = 0;
+	tim.tv_nsec = 100000000L; /* 0.1 seconds */
+
+	char *auth = "Authenticated. Sending files.";
+
+	sprintf(files_dir, "%s/%s", config.file_dir, user);
+
+	/* Check what file chunks exist */
+	if ((dir = opendir(files_dir)) != NULL) {
+		while((ent = readdir(dir)) != NULL) {
+			if (strstr(ent->d_name, file_name)) {
+				// Extract filename and chunk identifier
+				int name_len = strlen(strcpy(files[file_count], ent->d_name));
+				chunk_nums[file_count] = files[file_count][name_len-1] - '0';
+				file_count++;
+			}
+		}
+		closedir(dir);
+	} else {
+		printf("Dir %s is invalid\n", files_dir);
+		return 0;
+	}
+
+	/* Send authentication reply */
+	if (write(fd, auth, strlen(auth)) < 0)
+		errexit("Failed to write: %s\n", strerror(errno));
+
+	/* Wait 100ms between requests */
+	nanosleep(&tim, NULL);
+
+	/* Format file count message */
+	char file_msg[32];
+	sprintf(file_msg, "%d", file_count);
+
+	/* Send file count */
+	if (write(fd, file_msg, strlen(file_msg)) < 0)
+		errexit("Failed to write: %s\n", strerror(errno));
+
+	/* Wait 100ms between requests */
+	nanosleep(&tim, NULL);
+
+
+	while (files_sent < file_count) {
+		int remaining;
+		offset = 0;
+
+		char file_loc[256];
+		sprintf(file_loc, "%s/%s", files_dir, files[files_sent]);
+
+		/* Open file for reading */
+		if ((chunkd = open(file_loc, O_RDONLY)) < 0)
+			errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
+
+		/* Get file attributes */
+		if (fstat(chunkd, &file_stat) < 0)
+			errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
+
+		remaining = file_stat.st_size;
+		sprintf(file_msg, "%d %d", remaining, chunk_nums[files_sent]);
+		printf("msg: %s\n", file_msg);
+
+		/* Send file size and chunk index*/
+		if (write(fd, file_msg, strlen(file_msg)) < 0)
+			errexit("Failed to write: %s\n", strerror(errno));
+
+		/* Wait 100ms between requests */
+		nanosleep(&tim, NULL);
+
+		/* Send file */
+		while (((sent = sendfile(fd, chunkd, &offset, remaining)) >= 0) && (remaining > 0)) {
+			remaining -= sent;
+			printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
+		}
+
+		/* Wait 100ms between requests */
+		nanosleep(&tim, NULL);
+
+		files_sent++;
+	}
+
+}
+
+/*
  * process_put - Receive and save file chunk
  * Refernce - http://stackoverflow.com/questions/11952898/c-send-and-receive-file
  */
 int process_put(int fd, char* user, char* file_name) {
-	printf("User: %s\n", user);
 	char buf[BUFSIZE];
 	int file_size;
 	int remaining;

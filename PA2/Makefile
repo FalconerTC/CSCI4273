@@ -1,6 +1,6 @@
 #Makefile
 CC = gcc
-CFLAGS = -lssl -lcrypto
+CFLAGS = -lssl -lcrypto -lm
 INCLUDE = /usr/lib
 LIBS = 
 
