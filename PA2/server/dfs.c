@@ -28,12 +28,13 @@ struct Config {
 } config;
 
 /* Prototypes */
-void		parse_conf(const char *conffile, const char* server_dir);
+void		parse_conf(const char *conffile, const char *server_dir);
 int			interpret(int fd);
-int 		process_get(int fd, char* user, char* file_name);
-int 		process_put(int fd, char* user, char* file_name);
+int 		process_list(int fd, char *user);
+int 		process_get(int fd, char *user, char *file_name);
+int 		process_put(int fd, char *user, char *file_name);
 int			errexit(const char *format, ...);
-int 		connectsock(const char* portnum, int qlen);
+int 		connectsock(const char *portnum, int qlen);
 
 
 /*
@@ -149,7 +150,7 @@ int interpret(int fd) {
 		/* Zero end of array */
 		current[rv] = '\0';
 
-		printf("Found:  %s\n", current);
+		//printf("Found:  %s\n", current);
 
 		/* First request (auth request) */
 		if (len == rv) {
@@ -161,27 +162,76 @@ int interpret(int fd) {
 			sscanf(current, "%s %s", command, arg);
 
 			if (!strncasecmp(command, "LIST", 4)) {
-
+				printf("Processing LIST from %s\n", username);
+				process_list(fd, username);
 			} else if (!strncasecmp(command, "GET", 3)) {
+				printf("Processing GET from %s\n", username);
 				process_get(fd, username, arg);
 			} else if (!strncasecmp(command, "PUT", 3)) {
+				printf("Processing PUT from %s\n", username);
 				process_put(fd, username, arg);
 			}
 			// Close socket on command completion
 			break;
 		}
 	}
-
-	if (username != NULL)
-		printf("User: %s disconnected\n", username);
-	else
-		printf("No more\n");
 	
 	if (rv < 0)
 		errexit("echo read: %s\n", strerror(errno));
 		
 	return rv;
 }
+
+/*
+ * process_list - Return all chunks for a given user
+ */
+
+ int process_list(int fd, char* user) {
+ 	DIR *dir;
+ 	struct dirent *ent;
+ 	char buf[BUFSIZE];
+ 	char files_dir[128];
+ 	int file_count = 0;		/* Holds total chunks found */
+
+
+ 	struct timespec tim;
+ 	tim.tv_sec = 0;
+ 	tim.tv_nsec = 100000000L; /* 0.1 seconds */
+
+ 	char *auth = "Authenticated. Listing files.";
+
+ 	sprintf(files_dir, "%s/%s", config.file_dir, user);
+
+ 	strcpy(buf, "\0");
+
+ 	/* Check what file chunks exist */
+ 	if ((dir = opendir(files_dir)) != NULL) {
+ 		while((ent = readdir(dir)) != NULL) {
+ 			if (strlen(ent->d_name) > 2) {
+				strcat(buf, ent->d_name);
+				strcat(buf, "\n");
+				file_count++;
+			}
+ 		}
+ 		closedir(dir);
+ 	} else {
+ 		printf("Dir %s is invalid\n", files_dir);
+ 		return 0;
+ 	}
+
+ 	/* Send authentication reply */
+ 	if (write(fd, auth, strlen(auth)) < 0)
+ 		errexit("Failed to write: %s\n", strerror(errno));
+
+ 	/* Wait 100ms between requests */
+ 	nanosleep(&tim, NULL);
+
+ 	/* Send file list */
+ 	if (write(fd, buf, strlen(buf)) < 0)
+ 		errexit("Failed to write: %s\n", strerror(errno));
+
+ 	return 0;
+ }
 
 /*
  * process_get - Find and send file chunks
@@ -235,15 +285,12 @@ int process_get(int fd, char* user, char* file_name) {
 	char file_msg[32];
 	sprintf(file_msg, "Files: %d", file_count);
 
-	printf("Sending: %s\n", file_msg);
-
 	/* Send file count */
 	if (write(fd, file_msg, strlen(file_msg)) < 0)
 		errexit("Failed to write: %s\n", strerror(errno));
 
 	/* Wait 100ms between requests */
 	nanosleep(&tim, NULL);
-
 
 	while (files_sent < file_count) {
 		int remaining;
@@ -261,8 +308,6 @@ int process_get(int fd, char* user, char* file_name) {
 			errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
 
 		remaining = file_stat.st_size;
-		sprintf(file_msg, "%d %d", remaining, chunk_nums[files_sent]);
-		printf("msg: %s\n", file_msg);
 
 		/* Send file size and chunk index*/
 		if (write(fd, file_msg, strlen(file_msg)) < 0)
@@ -274,7 +319,7 @@ int process_get(int fd, char* user, char* file_name) {
 		/* Send file */
 		while (((sent = sendfile(fd, chunkd, &offset, remaining)) >= 0) && (remaining > 0)) {
 			remaining -= sent;
-			printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
+			//printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
 		}
 
 		/* Wait 100ms between requests */
@@ -323,8 +368,6 @@ int process_put(int fd, char* user, char* file_name) {
 		errexit("Failed to receive file size: %s\n", strerror(errno));
 	file_size = atoi(buf);
 
-	printf("\nFile size : %d\n", file_size);
-
 	/* Open file for writing */
 	if ((file = fopen(file_loc, "w")) < 0)
 		errexit("Failed to open file at: '%s' %s\n", file_loc, strerror(errno)); 
@@ -335,7 +378,7 @@ int process_put(int fd, char* user, char* file_name) {
 	while ((remaining > 0) && ((len = recv(fd, buf, BUFSIZE, 0)) > 0)) {
 		fwrite(buf, sizeof(char), len, file);
 		remaining -= len;
-		printf("Received %d bytes\n", len);
+		//printf("Received %d bytes\n", len);
 	}
 	fclose(file);
 }

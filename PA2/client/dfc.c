@@ -37,9 +37,9 @@ struct Config {
 /* Prototypes */
 void		parse_conf(const char *conffile);
 void		shell_loop();
-int			process_list(char* req);
-int 		process_get(char* file_name);
-int			process_put(char* file_name);
+int			process_list();
+int 		process_get(char *file_name);
+int			process_put(char *file_name);
 int			send_request(const int server_num, char *req, ...);
 int			errexit(const char *format, ...);
 int 		connectsock(const char *host, const char *portnum);
@@ -139,7 +139,7 @@ void shell_loop() {
 
 
 		if (!strncasecmp(command, "LIST", 4)) {
-
+			process_list();
 		} else if (!strncasecmp(command, "GET", 3)) {
 			if (strlen(line) <= 4)
 				printf("GET needs an argument\n");
@@ -153,19 +153,10 @@ void shell_loop() {
 		} else if (!strncasecmp(command, "EXIT", 4)) {
 			status = 0;
 		}
-		//printf("%s\n", command);
 	}
 	printf("Shutting down...\n");
 }
 
-/*
- * process_list - Process send and receive for LIST command
- */
-int process_list(char* req) {
-
-	//send_request(0, req);
-
-}
 
 /*
  * process_get - Process send and receive for GET command
@@ -188,7 +179,6 @@ int process_get(char* file_name) {
 	/* Generate random starting primary server */
 	srand(time(NULL));
 	int start = ((rand() % 2) * 2);
-	printf("rand: %d\n", start);
 
 	/* Send buf pointers as char array to get past va_args limitations */
 	sprintf(chunk_buf1, "%p %p", &(chunk[0]), &(chunk[1]));
@@ -196,7 +186,7 @@ int process_get(char* file_name) {
 
 	/* Request first primary server */
 	if ((ret = send_request(start, req, chunk_buf1)) < 0) {
-		printf("Failed: Trying secondary server %d\n", start+1);
+
 		/* Request first secondary server */
 		if ((ret = send_request(start+1, req, chunk_buf1)) < 0) {
 			printf("File is incomplete\n");
@@ -229,7 +219,7 @@ int process_get(char* file_name) {
 	if (pieces < count) {
 		/* Request second primary server */
 		if ((ret = send_request((start+2)%count, req, chunk_buf2)) < 0) {
-			printf("Failed: Trying secondary server %d\n", start+1);
+
 			/* Request first secondary server */
 			if ((ret = send_request(start+1, req, chunk_buf1)) < 0) {
 				printf("File is incomplete\n");
@@ -283,6 +273,8 @@ int process_get(char* file_name) {
 
 	fwrite(file_buf, sizeof(char), strlen(file_buf), file);
 
+	printf("File saved to: %s\n", file_loc);
+
 	fclose(file);
 }
 
@@ -304,8 +296,8 @@ int process_put(char* file_name) {
 	char sum[MD5_DIGEST_LENGTH];	/* Holds MD5 sum */
 	int order;						/* Defines the order of file splitting between server */
 	int order_mat[config.server_count][2];
-	//int count = config.server_count;
-	int count = 4;
+	int count = config.server_count;
+	//int count = 4;
 	int i;
 
 	sprintf(file_loc, "%s/%s", FILE_DIR, file_name);
@@ -334,10 +326,10 @@ int process_put(char* file_name) {
 	 * (4 X 2) Piece number X Server number
 	 */
 	 for (i = 1; i < count + 1; i++) {
-	 	order_mat[(i % count)][0] = i-1;
-	 	order_mat[(i % count)][1] = (i % count);
+	 	order_mat[((i + count - order) % count)][0] = i-1;
+	 	order_mat[((i + count - order) % count)][1] = (i % count);
 	 }
-	printf("Size: %ld Using: %ld\n", size, size / count);
+	//printf("Size: %ld Using: %ld\n", size, size / count);
 
 	/* Format new filename */
 	sprintf(req, "PUT .%s.", file_name);
@@ -354,8 +346,6 @@ int process_put(char* file_name) {
 			chunk_size--;
 		sprintf(piece_name, "%s%d", req, i+1);
 
-		printf("Sending '%s' request\n", piece_name);
-
 		send_request(order_mat[i][0], piece_name, chunk_size, file_loc, offset);
 		send_request(order_mat[i][1], piece_name, chunk_size, file_loc, offset);
 		offset += chunk_size;
@@ -365,7 +355,89 @@ int process_put(char* file_name) {
 	/* Send remaining data in last chunk */
 	send_request(order_mat[count-1][0], piece_name, (size - offset), file_loc, offset);
 	send_request(order_mat[count-1][1], piece_name, (size - offset), file_loc, offset);
+
+	printf("Request to save file sent\n");
 	
+}
+
+/*
+ * process_list - Process send and receive for LIST command
+ * LIST queries servers for file parts and shows complete files
+ */
+int process_list(char* req) {
+	int count = config.server_count;
+	char files[64][64];
+	int file_parts[64][count];
+	int file_count = 0;
+	char buf[BUFSIZE];
+	char *token;
+	int server;
+	int i, j;
+
+	/* Initialize file parts */
+	for (i = 0; i < 64; i++)
+		for (j = 0; j < count; j++)
+			file_parts[i][j] = 0;
+
+	/* Request part information from all servers */
+	for (server = 0; server < 4; server++) {
+
+		if (send_request(server, req, buf) < 0)
+			continue;
+
+		/* Parse file list */
+		token = strtok(buf, "\n");
+		while (token != NULL) {
+			char name[32];
+			int piece;
+			int new = 1;
+
+			/* Read and clean name and piece number */
+			sscanf(token, ".%s", name);
+			piece = name[strlen(name)-1] - '0';
+			name[strlen(name)-2] = '\0';
+
+			/* Check if file is already tracked */
+			for (i = 0; i < file_count; i++) {
+				if (!strcmp(name, files[i])) {
+					file_parts[i][piece-1] = 1;
+					new = 0;
+					break;
+				}
+			}
+
+			/* Insert new file */
+			if (new == 1) {
+				strcpy(files[file_count], name);
+				file_parts[file_count][piece-1] = 1;
+				file_count++;
+			}
+
+			token = strtok(NULL, "\n");
+		}
+
+	}
+
+	printf("\n");
+
+	/* Display compiled file information */
+	for (i = 0; i < file_count; i++) {
+		char name[32];
+		int value = 0;
+
+		/* Check if file can be completed */
+		for (j = 0; j < count; j++) {
+			value += (pow(10, j)*file_parts[i][j]);
+		}
+
+		strcpy(name, files[i]);
+
+		if (value < 1111)
+			printf("%s [incomplete]\n", name);
+		else
+			printf("%s\n", name);
+	}
+
 }
 
 /*
@@ -415,7 +487,7 @@ int send_request(const int server_num, char* req, ...) {
 		len = recv(sock, &resp, BUFSIZE, 0);
 		resp[len] = '\0';
 
-		printf("Found: %s\n", resp);
+		//printf("Found: %s\n", resp);
 
 		/* Process PUT */
 		if (!strncmp(resp, "Authenticated. Clear for transfer.", 34)) {
@@ -431,9 +503,8 @@ int send_request(const int server_num, char* req, ...) {
 			sprintf(file_size, "%d", remaining);
 			file_loc = va_arg(args, char *);
             offset = va_arg(args, int);
-            //offset = 0;
 
-			printf("size: %s remaining: %d %s\n", file_size, remaining, file_loc);
+			//printf("size: %s remaining: %d %s\n", file_size, remaining, file_loc);
 
 			/* Send file size */
 			if (write(sock, file_size, sizeof(file_size)) < 0)
@@ -454,8 +525,9 @@ int send_request(const int server_num, char* req, ...) {
 			/* Send file chunk */
 			while (((sent = sendfile(sock, fd, &offset, remaining)) >= 0) && (remaining > 0)) {
 				remaining -= sent;
-				printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
+				//printf("%d bytes sent. %d bytes remaining\n", sent, remaining);
 			}
+			return 0;
 		}
 		/* Process GET */
 		else if (!strncmp(resp, "Authenticated. Sending files.", 29)) {
@@ -473,13 +545,7 @@ int send_request(const int server_num, char* req, ...) {
 			if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0) 
 				errexit("Failed to receive file size: %s\n", strerror(errno));
 
-			printf("Received: %s\n", buf);
-
 			sscanf(buf, "Files: %d", &file_count);
-			//file_count = atoi(buf);
-
-			printf("Files: %d\n", file_count);
-
 
 			while (files_recv < file_count) {
 				int file_size = 0;
@@ -489,9 +555,6 @@ int send_request(const int server_num, char* req, ...) {
 				if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0)
 					errexit("Failed to receive file: %s\n", strerror(errno));
 				sscanf(buf, "%d %d", &file_size, &index);
-				//file_size = atoi(buf);
-
-				//printf("Size:  %d Index: %d\n", file_size, index);
 
 				remaining = file_size;
 				char chunk_buf[file_size];
@@ -499,24 +562,32 @@ int send_request(const int server_num, char* req, ...) {
 				/* Receive file chunk*/
 				while ((remaining > 0) && ((len = recv(sock, chunk_buf, BUFSIZE, 0)) > 0)) {
 					remaining -= len;
-					//printf("Received %d bytes, remaining %d\n", len, remaining);
 				}
+				/* Clean and copy data */
 				chunk_buf[file_size] = '\0';
 				strcpy(chunks[files_recv], chunk_buf);
 				ret += (pow(10, files_recv)*index);
 
 				files_recv++;
 			}
-			printf("Done %d\n", ret);
 			va_end(args);
 			return ret;
+		}
+		/* Process LIST */
+		else if (!strncmp(resp, "Authenticated. Listing files.", 29)) {
+			char	buf[BUFSIZE];
+			char 	*resp = va_arg(args, char *);
+
+			/* Receive file list */
+			if ((rv = recv(sock, buf, BUFSIZE, 0)) < 0)
+				errexit("Failed to receive file: %s\n", strerror(errno));
+
+			strcpy(resp, buf);
+			return rv;
 
 		}
 
-
-
-
-		return 0;
+		return -1;
 	}
 	if (rv < 0)
 		errexit("Error in select: %s\n", strerror(errno));
