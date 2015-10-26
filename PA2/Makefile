@@ -16,3 +16,6 @@ dfs:
 
 clean:
 	rm -f dfc dfs
+
+scrub:
+	rm -rf dfc dfs retrieval/* DFS/*

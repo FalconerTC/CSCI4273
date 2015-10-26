@@ -1,10 +1,13 @@
 #!/bin/sh
-echo "Creating server RootDir"
+echo "Creating server RootDir..."
 mkdir ./DFS
 echo "Calling make..."
 make all
 echo ""
 echo "Running servers"
 ./dfs /DFS1 10001 &
+./dfs /DFS1 10001 &
+./dfs /DFS3 10003 &
+./dfs /DFS4 10004 &
 echo "Run client with"
 echo "\t./dfc client/dfc1.conf"
