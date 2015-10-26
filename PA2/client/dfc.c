@@ -585,6 +585,10 @@ int send_request(const int server_num, char* req, ...) {
 			strcpy(resp, buf);
 			return rv;
 
+		} 
+		/* Login rejected */
+		else if (!strncmp(resp, "Invalid Username/Password.", 26)) {
+			printf("Username %s or password was invalid.\n", config.username);
 		}
 
 		return -1;

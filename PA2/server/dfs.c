@@ -111,7 +111,7 @@ void parse_conf(const char* conffile, const char* server_dir){
 		errexit("Failed opening config at: '%s' %s\n", conffile, strerror(errno));
 	// Iterate by line
 	while((read_len = getline(&line, &len, cfile)) != -1) {
-		line[read_len-1] = '\0';
+		line[read_len] = '\0';
 		// Ignore comments
 		if (line[0] == '#')
 			continue;
@@ -141,6 +141,7 @@ int interpret(int fd) {
 	char	username[32], password[32];
 	int		rv = 0;
 	int 	len = 0;
+	int 	auth = 0;
 
 	while ((rv = recv(fd, &buf[len], (BUFSIZE-len), 0)) > 0) {
 		char 	current[rv];
@@ -154,11 +155,35 @@ int interpret(int fd) {
 
 		/* First request (auth request) */
 		if (len == rv) {
+			int i = 0;
 			sscanf(current, "Username:%s Password:%s", username, password);
-			// TODO interpret credentials
+
+			/* Attempt to validate user */
+			for (i = 0; i < config.user_count; i++) {
+				if (!strcmp(config.server_users[i], username) && 
+					!strcmp(config.server_passwords[i], password)) {					
+					auth = 1;
+				}
+			}
+
 		} 
 		/* Second request (command request) */
 		else if (len > rv) { 
+
+			/* User not authorized */
+			if (auth == 0) {
+				char msg[] = "Invalid Username/Password.";
+
+				printf("Unauthorized connection attempt from %s\n", username);
+
+				/* Send authentication reply */
+				if (write(fd, msg, strlen(msg)) < 0)
+					errexit("Failed to write: %s\n", strerror(errno));
+
+				return rv;
+			}
+
+
 			sscanf(current, "%s %s", command, arg);
 
 			if (!strncasecmp(command, "LIST", 4)) {
@@ -355,8 +380,6 @@ int process_put(int fd, char* user, char* file_name) {
 		mkdir(file_loc, 0700);
 
 	sprintf(file_loc, "%s/%s", file_loc, file_name);
-
-	printf("Sending auth %s\n", file_loc);
 
 	/* Send authentication reply */
 	if (write(fd, auth, strlen(auth)) < 0)
