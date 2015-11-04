@@ -333,6 +333,7 @@ int process_get(int fd, char* user, char* file_name) {
 			errexit("Error fstat file at: '%s' %s\n", file_loc, strerror(errno));
 
 		remaining = file_stat.st_size;
+		sprintf(file_msg, "%d %d", remaining, chunk_nums[files_sent]);
 
 		/* Send file size and chunk index*/
 		if (write(fd, file_msg, strlen(file_msg)) < 0)
