@@ -49,8 +49,6 @@ int 		connectsock(const char *host, const char *portnum);
  */
 int main(int argc, char *argv[]) {
 	char *conffile;
-	int sock;						/* Server listening socket */
-    char *port = "10001";
 
     switch(argc) {
     	case 2:
@@ -62,8 +60,6 @@ int main(int argc, char *argv[]) {
     }
 
     parse_conf(conffile);
-
-    //send_request("127.0.0.1", port);
 
     shell_loop();
 
@@ -122,7 +118,6 @@ void parse_conf(const char* conffile){
  */
 void shell_loop() {
 	char *line = NULL;		/* Line read from STDIN */
-	char *token;
 	ssize_t len = 0;
 	ssize_t read;
 	char command[8], arg[64];
@@ -466,8 +461,7 @@ int send_request(const int server_num, char* req, ...) {
 	va_start(args, req);
 
 	/* Send credentials */
-	int auth_len = 0;
-	auth_len = sprintf(auth, "Username: %s Password: %s", config.username, config.password);
+	sprintf(auth, "Username: %s Password: %s", config.username, config.password);
 
 	if (write(sock, auth, strlen(auth)) < 0) {
 		printf("Connection to server %s unavailable\n", 

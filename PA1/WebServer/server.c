@@ -395,53 +395,52 @@ int errexit(const char *format, ...) {
 
 int connectsock(const char* portnum, int qlen) {
 
-  struct sockaddr_in sockin;
-  int sock;
+	struct sockaddr_in sockin;
+	int sock;
 
-  // Zero out sockin
-  memset(&sockin, 0, sizeof(sockin));
+	// Zero out sockin
+	memset(&sockin, 0, sizeof(sockin));
 
-  // Set family to internet
-  sockin.sin_family = AF_INET;
-  // Set address to any
-  sockin.sin_addr.s_addr = INADDR_ANY;
-  // Set port to network short conversion of given port
-  sockin.sin_port = htons((unsigned short)atoi(portnum));
+	// Set family to internet
+	sockin.sin_family = AF_INET;
+	// Set address to any
+	sockin.sin_addr.s_addr = INADDR_ANY;
+	// Set port to network short conversion of given port
+	sockin.sin_port = htons((unsigned short)atoi(portnum));
 
-  if (sockin.sin_port == 0)
-    errexit("Unable to get port number: \"%s\"\n", portnum);
+	if (sockin.sin_port == 0)
+	errexit("Unable to get port number: \"%s\"\n", portnum);
 
-  // Create internet TCP socket
-  sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+	// Create internet TCP socket
+	sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-  if (sock < 0)
-    errexit("Unable to create socket: %s\n", strerror(errno));
+	if (sock < 0)
+	errexit("Unable to create socket: %s\n", strerror(errno));
 
-  // Bind the socket to our parameters 
-    /* Bind the socket */
-        if (bind(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0) {
-            fprintf(stderr, "can't bind to %s port: %s; Trying other port\n",
-                portnum, strerror(errno));
-            sockin.sin_port=htons(0); /* request a port number to be allocated
-                                   by bind */
-            if (bind(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0)
-                errexit("can't bind: %s\n", strerror(errno));
-            else {
-                int socklen = sizeof(sockin);
+	/* Bind the socket */
+	    if (bind(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0) {
+	        fprintf(stderr, "can't bind to %s port: %s; Trying other port\n",
+	            portnum, strerror(errno));
+	        sockin.sin_port=htons(0); /* request a port number to be allocated
+	                               by bind */
+	        if (bind(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0)
+	            errexit("can't bind: %s\n", strerror(errno));
+	        else {
+	            int socklen = sizeof(sockin);
 
-                if (getsockname(sock, (struct sockaddr *)&sockin, &socklen) < 0)
-                        errexit("getsockname: %s\n", strerror(errno));
-                printf("New server port number is %d\n", ntohs(sockin.sin_port));
-            }
-        }
+	            if (getsockname(sock, (struct sockaddr *)&sockin, &socklen) < 0)
+	                    errexit("getsockname: %s\n", strerror(errno));
+	            printf("New server port number is %d\n", ntohs(sockin.sin_port));
+	        }
+	    }
 
-  // Start listening on socket
-  if (listen(sock, qlen) < 0) {
-    errexit("Unable to listen on %s port %s\n", portnum, strerror(errno));
-  }
+	// Start listening on socket
+	if (listen(sock, qlen) < 0) {
+	errexit("Unable to listen on %s port %s\n", portnum, strerror(errno));
+	}
 
-  printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
-  return sock;
+	printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
+	return sock;
 
 }
 

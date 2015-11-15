@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <netinet/in.h>
 #include <dirent.h>
 #include <time.h>
@@ -100,7 +101,6 @@ int main(int argc, char *argv[]) {
 void parse_conf(const char* conffile, const char* server_dir){
 	FILE *cfile;			/* Config file */
 	char* line;				/* Current line */
-	char* token;			/* Current token */
 	int read_len = 0;		/* Length read per line */
 	size_t len = 0;
 	char head[64], tail[64];
@@ -270,7 +270,6 @@ int process_get(int fd, char* user, char* file_name) {
 	int chunk_nums[8];
 	int file_count = 0;		/* Holds total chunks found */
 	int files_sent = 0;		/* Total file chunks sent */
-	struct timeval timeout;
 	struct stat file_stat;
 	int sent = 0;
 	off_t offset;
