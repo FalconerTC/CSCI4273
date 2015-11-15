@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <arpa/inet.h>
 #include <sys/errno.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
@@ -17,8 +18,21 @@
 #define QLEN 32		/* Maximum connections */
 #define	BUFSIZE	4096
 
+/* Structs */
+struct HTTP_Request {
+	char 	site[128];
+  char 	version[16];
+	char 	host[128];
+  int  port;
+	int 	keep_alive;
+  char  full_req[BUFSIZE];
+};
+
+static const struct HTTP_Request EmptyRequest;
+
 /* Prototypes */
-int			interpret(int fd);
+int			interpret(int client);
+int     send_request(int client, const struct HTTP_Request req);
 int			errexit(const char *format, ...);
 int 		connectsock(const char *portnum, int qlen);
 
@@ -26,10 +40,9 @@ int main(int argc, char *argv[]) {
   char *port;                     /* Port to host proxy at */
   struct sockaddr_in c_addr;      /* From address of client */
   int sock;                       /* Server listening socket */
-  fd_set	rfds;                   /* read file descriptor set	*/
-  fd_set	afds;                   /* active file descriptor set */
+  int connection;					        /* Connection socket */
   unsigned int alen;				      /* From address length */
-  int fd, nfds;
+  char remoteIP[INET6_ADDRSTRLEN];
 
   switch(argc) {
     case 2:
@@ -40,49 +53,191 @@ int main(int argc, char *argv[]) {
       exit(1);
   }
 
+  // Create and connect listening socket
   sock = connectsock(port, QLEN);
 
-  nfds = getdtablesize();
-  FD_ZERO(&afds);
-  FD_SET(sock, &afds);
-
-  while (1) {
-    /* Copy afds to rfds */
-    memcpy(&rfds, &afds, sizeof(rfds));
-
-    if (select(nfds, &rfds, NULL, NULL, NULL) < 0)
-      errexit("select: %s\n", strerror(errno));
-    if (FD_ISSET(sock, &rfds)) {
-      int	connection;	/* Connection socket */
-
+  while(1) {
+      // Handle new connection
       alen = sizeof(c_addr);
       connection = accept(sock, (struct sockaddr *)&c_addr, &alen);
       if (connection < 0)
-        errexit("Accept: %s\n",
-          strerror(errno));
-      FD_SET(connection, &afds);
+        errexit("accept: %s\n", strerror(errno));
+
+      printf("New connection from %s on socket %d\n",
+        inet_ntop(c_addr.sin_family,
+          &(c_addr.sin_addr),
+          remoteIP, INET6_ADDRSTRLEN),
+        connection);
+      // Start receiving data from connection
+      if (!fork()) {
+        close(sock);
+        if (interpret(connection) == 0)
+          close(connection);
+        exit(0);
+      }
+      close(connection);
     }
-    for (fd=0; fd<nfds; ++fd)
-      if (fd != sock && FD_ISSET(fd, &rfds))
-        if (interpret(fd) == 0) {
-          (void) close(fd);
-          FD_CLR(fd, &afds);
-        }
   }
-}
+
 
 /*
  * Intrepret - Read and pass GET request for client
  */
-int interpret(int fd) {
+int interpret(int client) {
+  char	*req_400_1 =	"HTTP/1.1 400 Bad Request: Invalid Method: ";
+  char	*req_400_2 =	"HTTP/1.1 400 Bad Request: Invalid HTTP-Version: ";
+  char	*req_500 =	"HTTP/1.1 500 Internal Server Error: ";
 
-  printf("Welcome!\n");
+  struct 	HTTP_Request req;
+  char buf[BUFSIZE];
+  char current[BUFSIZE];
+  char 	resp[BUFSIZE];
 
-  return 0;
+  int read_len = 0;
+  int len = 0;
+  int rv;
+  int i = 1;
+
+  /* Holds the state of a request
+   * 0 means no request received
+   * 1 means request initiated, waiting on paramaters */
+  int 	req_state = 0;
+  /* Maintains whether a request has been parsed for a single token
+   * 0 means no completed request
+   * 1 means a complete request has been parsed and will be sent */
+  int 	req_complete = 0;
+  /* Maintains whether a request has been sent. Used for building segmented requests.
+   * 0 means no request has been sent
+   * 1 means a request was sent during the last batch */
+  int		req_sent = 0;
+
+  fd_set set;
+  FD_ZERO(&set);
+  FD_SET(client, &set);
+
+  while ((rv = select(client + 1, &set, NULL, NULL, NULL)) > 0) {
+    /* Read input from user */
+    read_len = recv(client, &buf[len], (BUFSIZE-len), 0);
+
+    /* Copy last received line */
+    strncpy(current, &buf[len], read_len);
+    len += read_len;
+
+    /* Overwrite trailing new line */
+    current[read_len-1] = '\0';
+
+    printf("%d %s %d\n", i, current, len);
+
+    /* Parse currrent patch by line */
+    char *current_ptr = &current[0];
+    char *token = strsep(&current_ptr, "\n");
+
+    for(token; token != '\0'; token = strsep(&current_ptr, "\n")) {
+      /* Remove trailing '\r' */
+      if (token[strlen(token)-1] == '\r')
+				token[strlen(token) - 1] = '\0';
+      printf(" %d '%s'\n", i, token);
+
+      /* Double new line signifies the end of a request */
+      if (strlen(token) == 0) {
+        if (req_state == 1) {
+          req_complete = 1;
+        }
+        /* Exit loop if not currently building a request */
+        else {
+          break;
+        }
+      }
+      /* Parse request */
+      else {
+        switch(req_state) {
+          /* No request started */
+          case 0:
+            if (!strncmp(token, "GET ", 4)) {
+  						sscanf(token, "GET %s %s %*s",
+                  req.site, req.version);
+
+              /* Read in port from host */
+              int port = 0;
+              sscanf(req.site, "http://%*99[^:]:%99d", &port);
+              req.port = (port > 0 ? port : 80);
+
+  						req_state = 1;
+  						/* Unsuported version */
+  						if (strncmp(req.version, "HTTP/1.0", 8) &&
+  							strncmp(req.version, "HTTP/1.1", 8)) {
+  							strcpy(resp, req_400_2);
+                strcat(resp, req.version);
+                /* Send error */
+    						if (send(client, resp, strlen(resp), 0) < 0)
+    							errexit("echo write: %s\n", strerror(errno));
+  					  }
+            }
+            /* Invalid request received */
+            else {
+  						len = 0;
+  						strcpy(resp, req_400_1);
+  						strcat(resp, token);
+              /* Send error */
+  						if (send(client, resp, strlen(resp), 0) < 0)
+  							errexit("echo write: %s\n", strerror(errno));
+  					}
+            break;
+          /* Receiving request parameters */
+          case 1:
+            /* Read in host */
+            if (!strncmp(token, "Host:", 5))
+              sscanf(token, "%*s %s %*s", req.host);
+            /* Read in keep-alive */
+            if (!strcmp(token, "Connection: keep-alive"))
+              req.keep_alive = 1;
+            break;
+        }
+      }
+
+      /* HTTP request was captured */
+			if (req_complete == 1) {
+        strcpy(req.full_req, buf);
+				if (send_request(client, req) < 0) {
+					sprintf(resp, "%s", req_500);
+				 	/* Send server error */
+					if (write(client, resp, strlen(resp)) < 0)
+							errexit("echo write: %s\n", strerror(errno));
+				}
+
+				/* Restart request */
+				req = EmptyRequest;
+				req_state = 0;
+				req_complete = 0;
+				req_sent = 1;
+				len = 0;
+      }
+    }
+
+    // Kill connection
+    if (req.keep_alive == 0 && req_sent == 1)
+      return 0;
+    req_complete = 0;
+    req_sent = 0;
+
+  }
+  printf("Exiting %d\n", rv);
+  if (rv < 0)
+		errexit("Error in select: %s\n", strerror(errno));
+	/* Timeout */
+	return 0;
+}
+
+/* send HTTP Request and send back response */
+int send_request(int client, const struct HTTP_Request req) {
+
+
+  printf("%d %s %s %s %s\n", req.port, req.site, req.version, req.host, req.full_req);
+  return -1;
 }
 
 /*
- * errexit - print an error message and exit
+ * errexit - Print an error message and exit
  */
 int errexit(const char *format, ...) {
         va_list args;
