@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +35,8 @@ static const struct HTTP_Request EmptyRequest;
 int			interpret(int client);
 int     send_request(int client, const struct HTTP_Request req);
 int			errexit(const char *format, ...);
-int 		connectsock(const char *portnum, int qlen);
+int 		connectsock(const char *host, int portnum);
+int     bindsock(const char *portnum, int qlen);
 
 int main(int argc, char *argv[]) {
   char *port;                     /* Port to host proxy at */
@@ -54,7 +56,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Create and connect listening socket
-  sock = connectsock(port, QLEN);
+  sock = bindsock(port, QLEN);
 
   while(1) {
       // Handle new connection
@@ -96,7 +98,6 @@ int interpret(int client) {
   int read_len = 0;
   int len = 0;
   int rv;
-  int i = 1;
 
   /* Holds the state of a request
    * 0 means no request received
@@ -118,6 +119,11 @@ int interpret(int client) {
   while ((rv = select(client + 1, &set, NULL, NULL, NULL)) > 0) {
     /* Read input from user */
     read_len = recv(client, &buf[len], (BUFSIZE-len), 0);
+    /* Finish request if buf is empty */
+    if (strlen(buf) == 0) {
+      printf("BUF IS EMPTY\n");
+      break;
+    }
 
     /* Copy last received line */
     strncpy(current, &buf[len], read_len);
@@ -125,9 +131,6 @@ int interpret(int client) {
 
     /* Overwrite trailing new line */
     current[read_len-1] = '\0';
-
-    printf("%d %s %d\n", i, current, len);
-
     /* Parse currrent patch by line */
     char *current_ptr = &current[0];
     char *token = strsep(&current_ptr, "\n");
@@ -136,7 +139,6 @@ int interpret(int client) {
       /* Remove trailing '\r' */
       if (token[strlen(token)-1] == '\r')
 				token[strlen(token) - 1] = '\0';
-      printf(" %d '%s'\n", i, token);
 
       /* Double new line signifies the end of a request */
       if (strlen(token) == 0) {
@@ -154,12 +156,16 @@ int interpret(int client) {
           /* No request started */
           case 0:
             if (!strncmp(token, "GET ", 4)) {
+              char site_buf[128];
   						sscanf(token, "GET %s %s %*s",
-                  req.site, req.version);
+                  site_buf, req.version);
 
               /* Read in port from host */
               int port = 0;
-              sscanf(req.site, "http://%*99[^:]:%99d", &port);
+              sscanf(site_buf, "http://%99[^:]:%99d/", req.site, &port);
+              /* Removing trailing slash */
+              if (req.site[strlen(req.site) - 1] == '/')
+                req.site[strlen(req.site) - 1] = '\0';
               req.port = (port > 0 ? port : 80);
 
   						req_state = 1;
@@ -230,9 +236,37 @@ int interpret(int client) {
 
 /* send HTTP Request and send back response */
 int send_request(int client, const struct HTTP_Request req) {
+  char buf[BUFSIZE];
+  int server;         /* socket descriptor to server */
+  int len;
 
 
-  printf("%d %s %s %s %s\n", req.port, req.site, req.version, req.host, req.full_req);
+  /* Keep track of file descriptor */
+  fd_set set;
+  FD_ZERO(&set);
+  FD_SET(server, &set);
+
+  server = connectsock(req.host, req.port);
+
+  /* Forward request */
+  if (send(server, req.full_req, strlen(req.full_req), 0) < 0) {
+    printf("Connection to site %s unavailable\n",
+        req.site);
+    return -1;
+  }
+
+  printf("Request sent, awaiting response\n");
+
+  /* Listen for response */
+  while((len = recv(server, buf, BUFSIZE, 0)) > 0) {
+    buf[len] = '\0';
+    /* Forward to client*/
+    if (send(client, buf, len, 0) < 0) {
+      errexit("Failed write: %s\n", strerror(errno));
+      return -1;
+    }
+
+  }
   return -1;
 }
 
@@ -249,27 +283,69 @@ int errexit(const char *format, ...) {
 }
 
 /*
- * connectsock - Allocate and bind a server socket using TCP
+ * connectsock - Allocate and connect a socket using TCP
  */
-int connectsock(const char* portnum, int qlen) {
-	struct sockaddr_in sockin;
-	int sock;
+int connectsock(const char* host, int portnum) {
+	struct hostent  *phe;   		/* pointer to host information entry */
+	struct sockaddr_in sockin;		/* an Internet endpoint address */
+	int sock;              			/* socket descriptor */
 
 	/* Zero out sockin */
 	memset(&sockin, 0, sizeof(sockin));
 
 	sockin.sin_family = AF_INET;
-	sockin.sin_addr.s_addr = INADDR_ANY;
 
 	/* Convert and set port */
-	sockin.sin_port = htons((unsigned short)atoi(portnum));
+	sockin.sin_port = htons((unsigned short)portnum);
 	if (sockin.sin_port == 0)
 		errexit("Unable to get port number: \"%s\"\n", portnum);
 
-	// Create internet TCP socket
+	/* Map host name to IP address, allowing for dotted decimal */
+	if ((phe = gethostbyname(host)))
+		memcpy(&sockin.sin_addr, phe->h_addr, phe->h_length);
+	else if ( (sockin.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE )
+		errexit("Can't get \"%s\" host entry\n", host);
+
+	/* Allocate a socket */
 	sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0)
 		errexit("Unable to create socket: %s\n", strerror(errno));
+
+	/* Connect the socket */
+	if (connect(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0)
+		return -1; /* Connection failed */
+
+  printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
+	return sock;
+}
+
+/* Establish socket connection and sets it to listen for connections
+ * Returns: Socket created
+ */
+
+int bindsock(const char* portnum, int qlen) {
+
+	struct sockaddr_in sockin;
+	int sock;
+
+	// Zero out sockin
+	memset(&sockin, 0, sizeof(sockin));
+
+	// Set family to internet
+	sockin.sin_family = AF_INET;
+	// Set address to any
+	sockin.sin_addr.s_addr = INADDR_ANY;
+	// Set port to network short conversion of given port
+	sockin.sin_port = htons((unsigned short)atoi(portnum));
+
+	if (sockin.sin_port == 0)
+	errexit("Unable to get port number: \"%s\"\n", portnum);
+
+	// Create internet TCP socket
+	sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	if (sock < 0)
+	errexit("Unable to create socket: %s\n", strerror(errno));
 
 	/* Bind the socket */
 	    if (bind(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0) {
@@ -288,11 +364,12 @@ int connectsock(const char* portnum, int qlen) {
 	        }
 	    }
 
-	/* Start listening on socket */
+	// Start listening on socket
 	if (listen(sock, qlen) < 0) {
 	errexit("Unable to listen on %s port %s\n", portnum, strerror(errno));
 	}
 
 	printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
 	return sock;
+
 }
