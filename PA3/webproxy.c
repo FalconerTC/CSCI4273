@@ -65,11 +65,13 @@ int main(int argc, char *argv[]) {
       if (connection < 0)
         errexit("accept: %s\n", strerror(errno));
 
+
       printf("New connection from %s on socket %d\n",
         inet_ntop(c_addr.sin_family,
           &(c_addr.sin_addr),
           remoteIP, INET6_ADDRSTRLEN),
         connection);
+
       // Start receiving data from connection
       if (!fork()) {
         close(sock);
@@ -116,7 +118,10 @@ int interpret(int client) {
   FD_ZERO(&set);
   FD_SET(client, &set);
 
-  while ((rv = select(client + 1, &set, NULL, NULL, NULL)) > 0) {
+  struct timeval timeout;
+  timeout.tv_sec = 10;
+
+  while ((rv = select(client + 1, &set, NULL, NULL, &timeout)) > 0) {
     /* Read input from user */
     read_len = recv(client, &buf[len], (BUFSIZE-len), 0);
     /* Finish request if buf is empty */
@@ -157,7 +162,7 @@ int interpret(int client) {
           case 0:
             if (!strncmp(token, "GET ", 4)) {
               char site_buf[128];
-  						sscanf(token, "GET %s %s %*s",
+  						sscanf(token, "GET %s %s",
                   site_buf, req.version);
 
               /* Read in port from host */
@@ -167,6 +172,8 @@ int interpret(int client) {
               if (req.site[strlen(req.site) - 1] == '/')
                 req.site[strlen(req.site) - 1] = '\0';
               req.port = (port > 0 ? port : 80);
+
+              printf("Site is: %s %s\n", req.site, req.version);
 
   						req_state = 1;
   						/* Unsuported version */
@@ -217,10 +224,11 @@ int interpret(int client) {
 				req_complete = 0;
 				req_sent = 1;
 				len = 0;
+        break;
       }
     }
 
-    // Kill connection
+    /* Kill connection */
     if (req.keep_alive == 0 && req_sent == 1)
       return 0;
     req_complete = 0;
@@ -240,6 +248,7 @@ int send_request(int client, const struct HTTP_Request req) {
   int server;         /* socket descriptor to server */
   int len;
 
+  printf("Processing request to %s\n", req.site);
 
   /* Keep track of file descriptor */
   fd_set set;
@@ -255,19 +264,19 @@ int send_request(int client, const struct HTTP_Request req) {
     return -1;
   }
 
-  printf("Request sent, awaiting response\n");
-
+  int total = 0;
   /* Listen for response */
-  while((len = recv(server, buf, BUFSIZE, 0)) > 0) {
-    buf[len] = '\0';
+  while((len = read(server, buf, BUFSIZE)) != (size_t)NULL) {
+    total += len;
+
     /* Forward to client*/
-    if (send(client, buf, len, 0) < 0) {
+    if (write(client, buf, len) < 0) {
       errexit("Failed write: %s\n", strerror(errno));
       return -1;
     }
-
   }
-  return -1;
+  printf("Sent %d bytes from %s\n", total, req.site);
+  return 0;
 }
 
 /*
@@ -315,7 +324,7 @@ int connectsock(const char* host, int portnum) {
 	if (connect(sock, (struct sockaddr *)&sockin, sizeof(sockin)) < 0)
 		return -1; /* Connection failed */
 
-  printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
+  //printf("Socket %d connected on port %d\n", sock, ntohs(sockin.sin_port));
 	return sock;
 }
 
